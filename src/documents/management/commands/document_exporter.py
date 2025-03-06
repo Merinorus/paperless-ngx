@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import platform
 import shutil
 import tempfile
 import time
@@ -61,6 +62,32 @@ from paperless.models import ApplicationConfiguration
 from paperless_mail.models import MailAccount
 from paperless_mail.models import MailRule
 
+# If the users set a limit on export filename length,
+# we don't have exact controlon how many characters can be added
+# by counters, file extension etc. So we take a security margin.
+# Example of the biggest suffix: "_123456.pdf-thumbnail.webp" (26 chars).
+# Also, make sure that the minimum allowed value minus the suffix margin
+# is long enough to be thread by the filename generators (15 chars min).
+FILENAME_MAX_LENGTH_MIN_VALUE = 45
+FILENAME_MAX_LENGTH_SUFFIX_MARGIN = 26
+
+
+def _check_filesystem_max_filename_length(target) -> int | None:
+    """
+    Return the max allowed filename length by filesystem for a given path.
+
+    Returns None if no limit has been found.
+    """
+    result = None
+    try:
+        system = platform.system()
+        if system in ["Linux", "Darwin"]:
+            result = os.pathconf(target, "PC_NAME_MAX")
+    except Exception:
+        # Could not determine the allowed filesystem
+        pass
+    return result
+
 
 class Command(CryptMixin, BaseCommand):
     help = (
@@ -117,6 +144,13 @@ class Command(CryptMixin, BaseCommand):
                 "Use PAPERLESS_FILENAME_FORMAT for storing files in the "
                 "export directory, if configured."
             ),
+        )
+
+        parser.add_argument(
+            "--max-filename-length",
+            default=0,
+            help="Set an upper limit for file name length, including the extension. If not specified or set to 0, no limit is applied.",
+            type=int,
         )
 
         parser.add_argument(
@@ -194,6 +228,7 @@ class Command(CryptMixin, BaseCommand):
         self.compare_checksums: bool = options["compare_checksums"]
         self.compare_json: bool = options["compare_json"]
         self.use_filename_format: bool = options["use_filename_format"]
+        self.max_filename_length: int = options["max_filename_length"]
         self.use_folder_prefix: bool = options["use_folder_prefix"]
         self.delete: bool = options["delete"]
         self.no_archive: bool = options["no_archive"]
@@ -206,6 +241,27 @@ class Command(CryptMixin, BaseCommand):
         self.files_in_export_dir: set[Path] = set()
         self.exported_files: set[str] = set()
 
+        if self.max_filename_length < 0 or (
+            self.max_filename_length > 0
+            and self.max_filename_length < FILENAME_MAX_LENGTH_MIN_VALUE
+        ):
+            raise CommandError(
+                f"The filename length limit should be set to at least {FILENAME_MAX_LENGTH_MIN_VALUE} characters, or 0 to disable this limit",
+            )
+
+        filesystem_filename_limit = _check_filesystem_max_filename_length(self.target)
+        filesystem_filename_limit = 30
+        if (
+            filesystem_filename_limit
+            and filesystem_filename_limit < 255
+            and (
+                not self.max_filename_length
+                or self.max_filename_length > filesystem_filename_limit
+            )
+        ):
+            print(  # noqa: T201
+                f"WARNING: Your target directory reports a file name limit of {filesystem_filename_limit} character. Make sure to define an appropriate limit with --max-filename-length, otherwise the export might fail.",
+            )
         # If zipping, save the original target for later and
         # get a temporary directory for the target instead
         temp_dir = None
@@ -427,9 +483,15 @@ class Command(CryptMixin, BaseCommand):
                     document,
                     counter=filename_counter,
                     append_gpg=False,
+                    basename_max_length=self.max_filename_length
+                    - FILENAME_MAX_LENGTH_SUFFIX_MARGIN,
                 )
             else:
-                base_name = document.get_public_filename(counter=filename_counter)
+                base_name = document.get_public_filename(
+                    counter=filename_counter,
+                    basename_max_length=self.max_filename_length
+                    - FILENAME_MAX_LENGTH_SUFFIX_MARGIN,
+                )
 
             if base_name not in self.exported_files:
                 self.exported_files.add(base_name)

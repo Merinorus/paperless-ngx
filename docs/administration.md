@@ -322,11 +322,14 @@ exporter with `crontab`.
 If `--passphrase` is provided, it will be used to encrypt certain fields in the export. This value
 must be provided to import. If this value is lost, the export cannot be imported.
 
-!!! warning
+If `--max-filename-length` is provided, the document exporter will crop the file names
+that exceed the given limit. In this case, the file format may not be respected.
 
-    If exporting with the file name format, there may be errors due to
-    your operating system's maximum path lengths.  Try adjusting the export
-    target or consider not using the filename format.
+!!! warning
+If exporting with the file name format, there may be errors due to
+your operating system's maximum path lengths. Try adjusting the export
+target, or consider not using the filename format.
+In such cases, you should also set a limit with `--max-filename-length`.
 
 ### Document importer {#importer}
 
