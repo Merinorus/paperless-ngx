@@ -1420,7 +1420,7 @@ class DocumentViewSet(
         return None
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=5, max_stale=60))
     @method_decorator(
         condition(etag_func=metadata_etag, last_modified_func=metadata_last_modified),
     )
@@ -1481,7 +1481,7 @@ class DocumentViewSet(
         return Response(meta)
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=600, max_stale=3600 * 24))
     @method_decorator(
         condition(
             etag_func=suggestions_etag,
@@ -1548,7 +1548,7 @@ class DocumentViewSet(
         filter_backends=[],
         url_path="ai_suggestions",
     )
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=10, max_stale=3600 * 24))
     def ai_suggestions(self, request, pk=None):
         doc = get_object_or_404(
             Document.objects.select_related("owner").prefetch_related("versions"),
@@ -1709,7 +1709,7 @@ class DocumentViewSet(
         return Response(resp_data)
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=60, max_stale=3600 * 24 * 31))
     @method_decorator(
         condition(etag_func=preview_etag, last_modified_func=preview_last_modified),
     )
@@ -3847,6 +3847,7 @@ class GlobalSearchView(PassUserMixin):
 class StatisticsView(GenericAPIView[Any]):
     permission_classes = (IsAuthenticated,)
 
+    @method_decorator(cache_control(max_age=60, max_stale=600))
     def get(self, request, format=None):
         user = request.user if request.user is not None else None
         can_view_global_stats = has_global_statistics_permission(user) or user is None
