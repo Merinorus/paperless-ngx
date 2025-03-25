@@ -303,6 +303,24 @@ class Document(SoftDeleteModel, ModelWithOwner):
         return res
 
     @property
+    def content_for_classifier(self) -> str:
+        """
+        Crop the document content for the classifier.
+
+        Accelerate the training and the suggestions, at the cost of accuracy.
+        """
+        length_limit = 5000 * 1000000
+        if not self.content or len(self.content) <= length_limit:
+            return self.content  # No need to crop
+
+        # Keep up to N characters and eventually remove the last word that may be cropped
+        last_space = self.content.rfind(" ", 0, length_limit)
+        if last_space != -1:
+            return self.content[:last_space]
+
+        return self.content[:length_limit]
+
+    @property
     def source_path(self) -> Path:
         if self.filename:
             fname = str(self.filename)

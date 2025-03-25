@@ -269,7 +269,7 @@ class DocumentClassifier:
             Generates the content for documents, but once at a time
             """
             for doc in docs_queryset:
-                yield self.preprocess_content(doc.content)
+                yield self.preprocess_content(doc.content_for_classifier)
 
         self.data_vectorizer = CountVectorizer(
             analyzer="word",

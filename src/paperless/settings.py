@@ -284,6 +284,9 @@ MODEL_FILE = __get_path(
     DATA_DIR / "classification_model.pickle",
 )
 
+# Limit how many characters are used for classifier and suggestions
+CLASSIFIER_CONTENT_LIMIT = 5000
+
 LOGGING_DIR = __get_path("PAPERLESS_LOGGING_DIR", DATA_DIR / "log")
 
 CONSUMPTION_DIR = __get_path(

@@ -74,6 +74,12 @@ def get_suggestion_cache(document_id: int) -> SuggestionCacheData | None:
             return doc_suggestions
         else:  # pragma: no cover
             # Remove the key because something didn't match
+            logger.info(f"""Suggestion cache miss because something didn't match:
+                        - CLASSIFIER_VERSION_KEY in cache_hits: {CLASSIFIER_VERSION_KEY in cache_hits}
+                        - cache_hits[CLASSIFIER_VERSION_KEY] == DocumentClassifier.FORMAT_VERSION: {cache_hits[CLASSIFIER_VERSION_KEY] == DocumentClassifier.FORMAT_VERSION}
+                        - cache_hits[CLASSIFIER_VERSION_KEY] == doc_suggestions.classifier_version: {cache_hits[CLASSIFIER_VERSION_KEY] == doc_suggestions.classifier_version}
+                        - CLASSIFIER_HASH_KEY in cache_hits: {CLASSIFIER_HASH_KEY in cache_hits}
+                        - cache_hits[CLASSIFIER_HASH_KEY] == doc_suggestions.classifier_hash: {cache_hits[CLASSIFIER_HASH_KEY] == doc_suggestions.classifier_hash}""")
             cache.delete(doc_key)
     return None
 

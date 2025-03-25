@@ -721,6 +721,9 @@ class DocumentViewSet(
         ),
     )
     def suggestions(self, request, pk=None):
+        import time
+
+        t1 = time.time()
         doc = get_object_or_404(Document.objects.select_related("owner"), pk=pk)
         if request.user is not None and not has_perms_owner_aware(
             request.user,
@@ -732,14 +735,16 @@ class DocumentViewSet(
         document_suggestions = get_suggestion_cache(doc.pk)
 
         if document_suggestions is not None:
+            print(f"redis: doc id {doc.pk} refreshed (touch)")
             refresh_suggestions_cache(doc.pk)
             return Response(document_suggestions.suggestions)
 
+        print(f"redis: doc id {doc.pk} empty, loading classifier...")
         classifier = load_classifier()
 
         dates = []
         if settings.NUMBER_OF_SUGGESTED_DATES > 0:
-            gen = parse_date_generator(doc.filename, doc.content)
+            gen = parse_date_generator(doc.filename, doc.content_for_classifier)
             dates = sorted(
                 {i for i in itertools.islice(gen, settings.NUMBER_OF_SUGGESTED_DATES)},
             )
@@ -760,7 +765,8 @@ class DocumentViewSet(
 
         # Cache the suggestions and the classifier hash for later
         set_suggestions_cache(doc.pk, resp_data, classifier)
-
+        t2 = time.time()
+        print(f"{t2 - t1} seconds for suggestion")
         return Response(resp_data)
 
     @action(methods=["get"], detail=True, filter_backends=[])
