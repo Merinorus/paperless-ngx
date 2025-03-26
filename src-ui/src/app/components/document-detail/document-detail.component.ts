@@ -18,6 +18,7 @@ import {
   NgbNavModule,
 } from '@ng-bootstrap/ng-bootstrap'
 import { dirtyCheck, DirtyComponent } from '@ngneat/dirty-check-forms'
+import _ from 'lodash'
 import { PDFDocumentProxy, PdfViewerModule } from 'ng2-pdf-viewer'
 import { NgxBootstrapIconsModule } from 'ngx-bootstrap-icons'
 import { DeviceDetectorService } from 'ngx-device-detector'
@@ -793,11 +794,58 @@ export class DocumentDetailComponent
       })
   }
 
+  getUpdatedData(): any {
+    // Check and return only the modified data for partial update (PATCH).
+    // Iterate over the current values and check against the store.
+
+    let updatedDocument = { ...this.document }
+    console.log(updatedDocument)
+    var updateData = { id: this.document.id }
+    const storeData = this.store.getValue()
+
+    Object.keys(updatedDocument).forEach((key) => {
+      const formValue = updatedDocument[key]
+      const storeValue = storeData[key]
+      // Check arrays: tags...
+      if (Array.isArray(formValue)) {
+        if (
+          storeData.hasOwnProperty(key) &&
+          !_.isEqual(formValue, storeValue)
+        ) {
+          updateData[key] = formValue
+        }
+      }
+      // Check scalar values: title, content...
+      // The values not in the store are ignored: modified, mime_type, notes...
+      else if (
+        this.store.getValue().hasOwnProperty(key) &&
+        !(formValue === storeValue)
+      ) {
+        updateData[key] = formValue
+      }
+    })
+
+    // Check owner and permission change because key mapping is specific
+    if (updatedDocument['owner'] != storeData['permissions_form']['owner']) {
+      updateData['owner'] = updatedDocument['owner']
+    }
+    if (
+      !_.isEqual(
+        updatedDocument['set_permissions'],
+        storeData['permissions_form']['set_permissions']
+      )
+    ) {
+      updateData['set_permissions'] = updatedDocument['set_permissions']
+    }
+    return updateData
+  }
+
   save(close: boolean = false) {
+    let updateData = this.getUpdatedData()
     this.networkActive = true
     ;(document.activeElement as HTMLElement)?.dispatchEvent(new Event('change'))
     this.documentsService
-      .patch(this.document)
+      .patch(updateData)
       .pipe(first())
       .subscribe({
         next: (docValues) => {
@@ -849,9 +897,10 @@ export class DocumentDetailComponent
 
   saveEditNext() {
     this.networkActive = true
+    let updateData = this.getUpdatedData()
     this.store.next(this.documentForm.value)
     this.documentsService
-      .patch(this.document)
+      .patch(updateData)
       .pipe(
         switchMap((updateResult) => {
           return this.documentListViewService
