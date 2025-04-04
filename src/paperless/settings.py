@@ -883,6 +883,11 @@ if DEBUG and os.getenv("PAPERLESS_CACHE_BACKEND") is None:
         "django.core.cache.backends.locmem.LocMemCache"  # pragma: no cover
     )
 
+# Cache database sessions: sessions are first wrote in DB, then in the cache.
+# If Redis is not used (eg: development), the sessions are not cached.
+if CACHES["default"]["BACKEND"] == "django.core.cache.backends.redis.RedisCache":
+    SESSION_ENGINE = "django.contrib.sessions.backends.cached_db"
+
 
 def default_threads_per_worker(task_workers) -> int:
     # always leave one core open
