@@ -37,6 +37,7 @@ from documents.models import DocumentType
 from documents.models import MatchingModel
 from documents.models import PaperlessTask
 from documents.models import SavedView
+from documents.models import StoragePath
 from documents.models import Tag
 from documents.models import Workflow
 from documents.models import WorkflowAction
@@ -106,7 +107,9 @@ def set_correspondent(
     if document.correspondent and not replace:
         return
 
-    potential_correspondents = matching.match_correspondents(document, classifier)
+    potential_correspondents = Correspondent.objects.filter(
+        pk__in=matching.match_correspondents(document, classifier),
+    )
 
     potential_count = len(potential_correspondents)
     selected = potential_correspondents[0] if potential_correspondents else None
@@ -162,7 +165,9 @@ def set_document_type(
     if document.document_type and not replace:
         return
 
-    potential_document_type = matching.match_document_types(document, classifier)
+    potential_document_type = DocumentType.objects.filter(
+        pk__in=matching.match_document_types(document, classifier),
+    )
 
     potential_count = len(potential_document_type)
     selected = potential_document_type[0] if potential_document_type else None
@@ -224,7 +229,7 @@ def set_tags(
 
     current_tags = set(document.tags.all())
 
-    matched_tags = matching.match_tags(document, classifier)
+    matched_tags = Tag.objects.filter(pk__in=matching.match_tags(document, classifier))
 
     relevant_tags = set(matched_tags) - current_tags
 
@@ -275,9 +280,11 @@ def set_storage_path(
     if document.storage_path and not replace:
         return
 
-    potential_storage_path = matching.match_storage_paths(
-        document,
-        classifier,
+    potential_storage_path = StoragePath.objects.filter(
+        pk__in=matching.match_storage_paths(
+            document,
+            classifier,
+        ),
     )
 
     potential_count = len(potential_storage_path)

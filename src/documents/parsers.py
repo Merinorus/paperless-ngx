@@ -320,6 +320,10 @@ def parse_date_generator(filename, text) -> Iterator[datetime.datetime]:
     yield from __process_content(text, settings.DATE_ORDER)
 
 
+def parse_date_list(filename, text) -> list[datetime.datetime]:
+    return list(parse_date_generator(filename, text))
+
+
 class ParseError(Exception):
     pass
 

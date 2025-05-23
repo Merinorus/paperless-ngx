@@ -4,6 +4,7 @@ import tempfile
 import uuid
 import zoneinfo
 from binascii import hexlify
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from datetime import timedelta
 from pathlib import Path
@@ -1662,6 +1663,10 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         response = self.client.get("/api/documents/34676/suggestions/")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
+    @mock.patch(
+        "documents.views.ProcessPoolExecutor",
+        new_callable=lambda: ThreadPoolExecutor,
+    )
     @mock.patch("documents.views.match_storage_paths")
     @mock.patch("documents.views.match_document_types")
     @mock.patch("documents.views.match_tags")
@@ -1673,17 +1678,23 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         match_tags,
         match_document_types,
         match_storage_paths,
+        executor,
     ):
+        """
+        The process pool executor requires all parameters can be pickled,
+        which is not the case for mock objects.
+        So it is replaced by a thread pool executor in tests.
+        """
         doc = Document.objects.create(
             title="test",
             mime_type="application/pdf",
             content="this is an invoice from 12.04.2022!",
         )
 
-        match_correspondents.return_value = [Correspondent(id=88), Correspondent(id=2)]
-        match_tags.return_value = [Tag(id=56), Tag(id=123)]
-        match_document_types.return_value = [DocumentType(id=23)]
-        match_storage_paths.return_value = [StoragePath(id=99), StoragePath(id=77)]
+        match_correspondents.return_value = [88, 2]
+        match_tags.return_value = [56, 123]
+        match_document_types.return_value = [23]
+        match_storage_paths.return_value = [99, 77]
 
         response = self.client.get(f"/api/documents/{doc.pk}/suggestions/")
         self.assertEqual(
@@ -1697,6 +1708,10 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
             },
         )
 
+    @mock.patch(
+        "documents.views.ProcessPoolExecutor",
+        new_callable=lambda: ThreadPoolExecutor,
+    )
     @mock.patch("documents.views.load_classifier")
     @mock.patch("documents.views.match_storage_paths")
     @mock.patch("documents.views.match_document_types")
@@ -1710,6 +1725,7 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         match_document_types,
         match_storage_paths,
         mocked_load,
+        executor,
     ):
         """
         GIVEN:
@@ -1751,10 +1767,10 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         )
 
         # Mock the matching
-        match_correspondents.return_value = [Correspondent(id=88), Correspondent(id=2)]
-        match_tags.return_value = [Tag(id=56), Tag(id=123)]
-        match_document_types.return_value = [DocumentType(id=23)]
-        match_storage_paths.return_value = [StoragePath(id=99), StoragePath(id=77)]
+        match_correspondents.return_value = [88, 2]
+        match_tags.return_value = [56, 123]
+        match_document_types.return_value = [23]
+        match_storage_paths.return_value = [99, 77]
 
         doc = Document.objects.create(
             title="test",
@@ -1788,11 +1804,11 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         response = self.client.get(f"/api/documents/{doc.pk}/suggestions/")
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 
-    @mock.patch("documents.parsers.parse_date_generator")
+    @mock.patch("documents.parsers.parse_date_list")
     @override_settings(NUMBER_OF_SUGGESTED_DATES=0)
     def test_get_suggestions_dates_disabled(
         self,
-        parse_date_generator,
+        parse_date_list,
     ):
         """
         GIVEN:
@@ -1809,7 +1825,7 @@ class TestDocumentApi(DirectoriesMixin, DocumentConsumeDelayMixin, APITestCase):
         )
 
         self.client.get(f"/api/documents/{doc.pk}/suggestions/")
-        self.assertFalse(parse_date_generator.called)
+        self.assertFalse(parse_date_list.called)
 
     def test_saved_views(self):
         u1 = User.objects.create_superuser("user1")

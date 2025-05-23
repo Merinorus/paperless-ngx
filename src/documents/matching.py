@@ -4,7 +4,11 @@ import logging
 import re
 from fnmatch import fnmatch
 from typing import TYPE_CHECKING
+from typing import NamedTuple
 
+from django.contrib.auth import get_user_model
+
+from documents.classifier import load_classifier
 from documents.data_models import ConsumableDocument
 from documents.data_models import DocumentSource
 from documents.models import Correspondent
@@ -18,14 +22,17 @@ from documents.models import WorkflowTrigger
 from documents.permissions import get_objects_for_user_owner_aware
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from documents.classifier import DocumentClassifier
+
 
 logger = logging.getLogger("paperless.matching")
 
 
 def log_reason(
     matching_model: MatchingModel | WorkflowTrigger,
-    document: Document,
+    document: Document | SerializedDocument,
     reason: str,
 ):
     class_name = type(matching_model).__name__
@@ -37,102 +44,190 @@ def log_reason(
     )
 
 
-def match_correspondents(document: Document, classifier: DocumentClassifier, user=None):
+class SerializedUser(NamedTuple):
+    id: int
+
+    @classmethod
+    def from_model(cls, model: User | None) -> SerializedUser | None:
+        if model is None:
+            return None
+        return cls(id=model.id)
+
+
+class SerializedDocument(NamedTuple):
+    pk: int
+    content: str
+    owner: SerializedUser | None
+    str_repr: str
+
+    def __str__(self):
+        return self.str_repr
+
+    @classmethod
+    def from_model(cls, model: Document):
+        owner = SerializedUser.from_model(model.owner)
+        return cls(pk=model.pk, content=model.content, owner=owner, str_repr=str(model))
+
+    @property
+    def id(self):
+        return self.pk
+
+
+class SerializedMatching(NamedTuple):
+    is_insensitive: bool
+    match: str
+    matching_algorithm: int
+    pk: int
+
+    @classmethod
+    def from_model(cls, model: MatchingModel):
+        return cls(
+            is_insensitive=model.is_insensitive,
+            match=model.match,
+            matching_algorithm=model.matching_algorithm,
+            pk=model.pk,
+        )
+
+
+User = get_user_model()
+
+
+def match_correspondents(
+    document: Document | SerializedDocument,
+    classifier: DocumentClassifier | None = None,
+    user_id: int | None = None,
+    correspondents: Iterable[MatchingModel | SerializedMatching] | None = None,
+):
+    if not classifier:
+        classifier = load_classifier()
+
     pred_id = classifier.predict_correspondent(document.content) if classifier else None
 
-    if user is None and document.owner is not None:
-        user = document.owner
-
-    if user is not None:
-        correspondents = get_objects_for_user_owner_aware(
-            user,
-            "documents.view_correspondent",
-            Correspondent,
+    if not correspondents:
+        if not user_id and document.owner:
+            user_id = document.owner.id
+        user = User.objects.get(id=user_id) if user_id else None
+        correspondents = list(
+            get_objects_for_user_owner_aware(
+                user,
+                "documents.view_correspondent",
+                Correspondent,
+            )
+            if user
+            else Correspondent.objects.all(),
         )
-    else:
-        correspondents = Correspondent.objects.all()
 
-    return list(
-        filter(
-            lambda o: matches(o, document)
-            or (o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO),
-            correspondents,
-        ),
-    )
+    matching_ids: list[int] = [
+        o.pk
+        for o in correspondents
+        if matches(o, document)
+        or (o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO)
+    ]
+    return matching_ids
 
 
-def match_document_types(document: Document, classifier: DocumentClassifier, user=None):
+def match_document_types(
+    document: Document | SerializedDocument,
+    classifier: DocumentClassifier | None = None,
+    user_id: int | None = None,
+    document_types: Iterable[MatchingModel | SerializedMatching] | None = None,
+):
+    if not classifier:
+        classifier = load_classifier()
     pred_id = classifier.predict_document_type(document.content) if classifier else None
 
-    if user is None and document.owner is not None:
-        user = document.owner
-
-    if user is not None:
-        document_types = get_objects_for_user_owner_aware(
-            user,
-            "documents.view_documenttype",
-            DocumentType,
+    if not document_types:
+        if not user_id and document.owner:
+            user_id = document.owner.id
+        user = User.objects.get(id=user_id) if user_id else None
+        document_types = list(
+            get_objects_for_user_owner_aware(
+                user,
+                "documents.view_documenttype",
+                DocumentType,
+            )
+            if user
+            else DocumentType.objects.all(),
         )
-    else:
-        document_types = DocumentType.objects.all()
 
-    return list(
-        filter(
-            lambda o: matches(o, document)
-            or (o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO),
-            document_types,
-        ),
-    )
+    matching_ids: list[int] = [
+        o.pk
+        for o in document_types
+        if matches(o, document)
+        or (o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO)
+    ]
+    return matching_ids
 
 
-def match_tags(document: Document, classifier: DocumentClassifier, user=None):
+def match_tags(
+    document: Document | SerializedDocument,
+    classifier: DocumentClassifier | None = None,
+    user_id: int | None = None,
+    tags: Iterable[MatchingModel | SerializedMatching] | None = None,
+):
+    if not classifier:
+        classifier = load_classifier()
     predicted_tag_ids = classifier.predict_tags(document.content) if classifier else []
 
-    if user is None and document.owner is not None:
-        user = document.owner
+    if not tags:
+        if not user_id and document.owner:
+            user_id = document.owner.id
+        user = User.objects.get(id=user_id) if user_id else None
+        tags = list(
+            get_objects_for_user_owner_aware(user, "documents.view_tag", Tag)
+            if user
+            else Tag.objects.all(),
+        )
 
-    if user is not None:
-        tags = get_objects_for_user_owner_aware(user, "documents.view_tag", Tag)
-    else:
-        tags = Tag.objects.all()
-
-    return list(
-        filter(
-            lambda o: matches(o, document)
-            or (
-                o.matching_algorithm == MatchingModel.MATCH_AUTO
-                and o.pk in predicted_tag_ids
-            ),
-            tags,
-        ),
-    )
+    matching_ids: list[int] = [
+        o.pk
+        for o in tags
+        if matches(o, document)
+        or (
+            o.pk in predicted_tag_ids
+            and o.matching_algorithm == MatchingModel.MATCH_AUTO
+        )
+    ]
+    return matching_ids
 
 
-def match_storage_paths(document: Document, classifier: DocumentClassifier, user=None):
+def match_storage_paths(
+    document: Document | SerializedDocument,
+    classifier: DocumentClassifier | None = None,
+    user_id: int | None = None,
+    storage_paths: Iterable[MatchingModel | SerializedMatching] | None = None,
+):
+    if not classifier:
+        classifier = load_classifier()
     pred_id = classifier.predict_storage_path(document.content) if classifier else None
 
-    if user is None and document.owner is not None:
-        user = document.owner
-
-    if user is not None:
-        storage_paths = get_objects_for_user_owner_aware(
-            user,
-            "documents.view_storagepath",
-            StoragePath,
+    if not storage_paths:
+        if not user_id and document.owner:
+            user_id = document.owner.id
+        user = User.objects.get(id=user_id) if user_id else None
+        storage_paths = list(
+            get_objects_for_user_owner_aware(
+                user,
+                "documents.view_storagepath",
+                StoragePath,
+            )
+            if user
+            else StoragePath.objects.all(),
         )
-    else:
-        storage_paths = StoragePath.objects.all()
 
-    return list(
-        filter(
-            lambda o: matches(o, document)
-            or (o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO),
-            storage_paths,
-        ),
-    )
+    matching_ids: list[int] = [
+        o.pk
+        for o in storage_paths
+        if matches(o, document)
+        or (o.pk == pred_id and o.matching_algorithm == MatchingModel.MATCH_AUTO)
+    ]
+    return matching_ids
 
 
-def matches(matching_model: MatchingModel, document: Document):
+def matches(
+    matching_model: MatchingModel | SerializedMatching,
+    document: Document | SerializedDocument,
+):
     search_kwargs = {}
 
     document_content = document.content

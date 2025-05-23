@@ -5,6 +5,7 @@ import platform
 import re
 import tempfile
 import zipfile
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from time import mktime
@@ -109,6 +110,8 @@ from documents.filters import ShareLinkFilterSet
 from documents.filters import StoragePathFilterSet
 from documents.filters import TagFilterSet
 from documents.mail import send_email
+from documents.matching import SerializedDocument
+from documents.matching import SerializedMatching
 from documents.matching import match_correspondents
 from documents.matching import match_document_types
 from documents.matching import match_storage_paths
@@ -128,7 +131,7 @@ from documents.models import Workflow
 from documents.models import WorkflowAction
 from documents.models import WorkflowTrigger
 from documents.parsers import get_parser_class_for_mime_type
-from documents.parsers import parse_date_generator
+from documents.parsers import parse_date_list
 from documents.permissions import PaperlessAdminPermissions
 from documents.permissions import PaperlessNotePermissions
 from documents.permissions import PaperlessObjectPermissions
@@ -738,24 +741,105 @@ class DocumentViewSet(
 
         classifier = load_classifier()
 
+        serialized_doc = SerializedDocument.from_model(doc)
+
         dates = []
-        if settings.NUMBER_OF_SUGGESTED_DATES > 0:
-            gen = parse_date_generator(doc.filename, doc.content)
-            dates = sorted(
-                {i for i in itertools.islice(gen, settings.NUMBER_OF_SUGGESTED_DATES)},
+
+        with ProcessPoolExecutor() as executor:
+            futures = dict()
+            if settings.NUMBER_OF_SUGGESTED_DATES > 0:
+                futures.update(
+                    {
+                        "dates": executor.submit(
+                            parse_date_list,
+                            doc.filename,
+                            doc.content,
+                        ),
+                    },
+                )
+            correspondents = get_objects_for_user_owner_aware(
+                request.user,
+                "documents.view_correspondent",
+                Correspondent,
+            )
+            futures.update(
+                {
+                    "correspondents": executor.submit(
+                        match_correspondents,
+                        serialized_doc,
+                        user_id=request.user.id,
+                        correspondents=[
+                            SerializedMatching.from_model(c) for c in correspondents
+                        ],
+                    ),
+                },
+            )
+            document_types = get_objects_for_user_owner_aware(
+                request.user,
+                "documents.view_documenttype",
+                DocumentType,
+            )
+            futures.update(
+                {
+                    "document_types": executor.submit(
+                        match_document_types,
+                        serialized_doc,
+                        user_id=request.user.id,
+                        document_types=[
+                            SerializedMatching.from_model(c) for c in document_types
+                        ],
+                    ),
+                },
+            )
+            storage_paths = get_objects_for_user_owner_aware(
+                request.user,
+                "documents.view_storagepath",
+                StoragePath,
+            )
+            futures.update(
+                {
+                    "storage_paths": executor.submit(
+                        match_storage_paths,
+                        serialized_doc,
+                        user_id=request.user.id,
+                        storage_paths=[
+                            SerializedMatching.from_model(c) for c in storage_paths
+                        ],
+                    ),
+                },
+            )
+            tags = get_objects_for_user_owner_aware(
+                request.user,
+                "documents.view_tag",
+                Tag,
+            )
+            futures.update(
+                {
+                    "tags": executor.submit(
+                        match_tags,
+                        serialized_doc,
+                        user_id=request.user.id,
+                        tags=[SerializedMatching.from_model(c) for c in tags],
+                    ),
+                },
             )
 
+            results = {key: future.result() for key, future in futures.items()}
+        if settings.NUMBER_OF_SUGGESTED_DATES > 0:
+            dates = sorted(
+                {
+                    i
+                    for i in itertools.islice(
+                        results["dates"],
+                        settings.NUMBER_OF_SUGGESTED_DATES,
+                    )
+                },
+            )
         resp_data = {
-            "correspondents": [
-                c.id for c in match_correspondents(doc, classifier, request.user)
-            ],
-            "tags": [t.id for t in match_tags(doc, classifier, request.user)],
-            "document_types": [
-                dt.id for dt in match_document_types(doc, classifier, request.user)
-            ],
-            "storage_paths": [
-                dt.id for dt in match_storage_paths(doc, classifier, request.user)
-            ],
+            "correspondents": [id for id in results["correspondents"]],
+            "tags": [id for id in results["tags"]],
+            "document_types": [id for id in results["document_types"]],
+            "storage_paths": [id for id in results["storage_paths"]],
             "dates": [date.strftime("%Y-%m-%d") for date in dates if date is not None],
         }
 
