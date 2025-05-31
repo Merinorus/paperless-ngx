@@ -1,4 +1,3 @@
-import itertools
 import logging
 import os
 import platform
@@ -8,6 +7,7 @@ import zipfile
 from collections import defaultdict
 from collections import deque
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timedelta
 from http import HTTPStatus
@@ -179,7 +179,7 @@ from documents.permissions import has_system_status_permission
 from documents.permissions import permitted_document_ids
 from documents.permissions import permitted_object_ids
 from documents.permissions import set_permissions_for_object
-from documents.plugins.date_parsing import get_date_parser
+from documents.plugins.date_parsing import parse_date_set
 from documents.schema import generate_object_with_permissions_schema
 from documents.search import SearchHit
 from documents.serialisers import AcknowledgeTasksViewSerializer
@@ -1475,18 +1475,13 @@ class DocumentViewSet(
 
         dates = []
         if settings.NUMBER_OF_SUGGESTED_DATES > 0:
-            with get_date_parser() as date_parser:
-                gen = date_parser.parse(doc.filename, doc.content)
-                dates = sorted(
-                    {
-                        i
-                        for i in itertools.islice(
-                            gen,
-                            settings.NUMBER_OF_SUGGESTED_DATES,
-                        )
-                    },
+            with ThreadPoolExecutor() as executor:
+                future_dates = executor.submit(
+                    parse_date_set,
+                    doc.filename,
+                    doc.content,
+                    settings.NUMBER_OF_SUGGESTED_DATES,
                 )
-
         resp_data = {
             "correspondents": [
                 c.id for c in match_correspondents(doc, classifier, request.user)
@@ -1498,8 +1493,14 @@ class DocumentViewSet(
             "storage_paths": [
                 dt.id for dt in match_storage_paths(doc, classifier, request.user)
             ],
-            "dates": [date.strftime("%Y-%m-%d") for date in dates if date is not None],
+            "dates": [],
         }
+        if settings.NUMBER_OF_SUGGESTED_DATES > 0:
+            dates = future_dates.result()
+            if dates:
+                resp_data["dates"] = [
+                    date.strftime("%Y-%m-%d") for date in dates if date is not None
+                ]
 
         # Cache the suggestions and the classifier hash for later
         set_suggestions_cache(doc.pk, resp_data, classifier)
