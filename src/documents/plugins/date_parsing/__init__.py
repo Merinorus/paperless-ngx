@@ -1,7 +1,9 @@
 import logging
+from datetime import datetime
 from functools import lru_cache
 from importlib.metadata import EntryPoint
 from importlib.metadata import entry_points
+from itertools import islice
 from typing import Final
 
 from django.conf import settings
@@ -93,9 +95,28 @@ def get_date_parser() -> DateParserPluginBase:
     return parser_class(config=config)
 
 
+def parse_date_set(doc_filename, doc_content, nb_dates) -> set[datetime]:
+    """
+    Helper to get a set of parsed dates for a given document.
+    Can be called within a separate thread.
+    """
+    with get_date_parser() as date_parser:
+        gen = date_parser.parse(doc_filename, doc_content)
+        return sorted(
+            {
+                i
+                for i in islice(
+                    gen,
+                    nb_dates,
+                )
+            },
+        )
+
+
 __all__ = [
     "DateParserConfig",
     "DateParserPluginBase",
     "RegexDateParserPlugin",
     "get_date_parser",
+    "parse_date_set",
 ]
