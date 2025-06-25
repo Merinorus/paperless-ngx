@@ -26,6 +26,8 @@ from documents.caching import CACHE_50_MINUTES
 from documents.caching import CLASSIFIER_HASH_KEY
 from documents.caching import CLASSIFIER_MODIFIED_KEY
 from documents.caching import CLASSIFIER_VERSION_KEY
+from documents.caching import get_stemmer_cache
+from documents.caching import set_stemmer_cache
 from documents.models import Document
 from documents.models import MatchingModel
 
@@ -57,15 +59,48 @@ def _load_ntlk_resources():
     return stemmer, stop_words, word_tokenize
 
 
-@lru_cache(maxsize=20000)
-def stem_and_skip_stop_word(word: str):
-    """
-    Reduce a given word to its stem. If it's a stop word, return an empty string.
+RE_D = re.compile(r"\d")
 
-    E.g. "amazement", "amaze" and "amazed" all return "amaz".
+
+def stem_and_skip_stop_words(words: list[str], *, set_cache=True):
     """
-    stemmer, stop_words, _ = _load_ntlk_resources()
-    return stemmer.stem(word) if word not in stop_words else ""
+    Reduce a list of words to their stem. Stop words are converted to empty strings.
+
+    :param words: the list of words to stem
+    """
+    stem_cache = get_stemmer_cache()
+    # 10000 elements is about 200 to 500 KB shared Redis cache
+    # Keep this cache small to avoid read/write delays
+    cache_limit = 10000
+
+    def _stem_and_skip_stop_word(word: str, stem_cache, cache_limit=cache_limit):
+        """
+        Reduce a given word to its stem. If it's a stop word, return an empty string.
+
+        E.g. "amazement", "amaze" and "amazed" all return "amaz".
+        """
+        if word in stem_cache:
+            stem_cache.move_to_end(word)
+            result = stem_cache[word]
+        # Assumption: words that contain numbers are never stemmed
+        elif RE_D.search(word):
+            return word
+        else:
+            stemmer, stop_words, _ = _load_ntlk_resources()
+            result = stemmer.stem(word) if word not in stop_words else ""
+            stem_cache[word] = result
+            stem_cache.move_to_end(word)
+            while len(stem_cache) > cache_limit:
+                stem_cache.popitem(last=False)  # remove oldest entry
+        return result
+
+    # Stem the words and skip stop words
+    result = " ".join(
+        filter(None, (_stem_and_skip_stop_word(w, stem_cache) for w in words)),
+    )
+    if set_cache:
+        set_stemmer_cache(stem_cache)
+    return result
 
 
 def tokenize(text: str):
@@ -321,7 +356,7 @@ class DocumentClassifier:
             Generates the content for documents, but once at a time
             """
             for doc in docs_queryset:
-                yield self.preprocess_content(doc.content)
+                yield self.preprocess_content(doc.content, set_cache=False)
 
         self.data_vectorizer = CountVectorizer(
             analyzer="word",
@@ -396,7 +431,6 @@ class DocumentClassifier:
             logger.debug(
                 "There are no storage paths. Not training storage path classifier.",
             )
-        stem_and_skip_stop_word.cache_clear()
         self.last_doc_change_time = latest_doc_change
         self.last_auto_type_hash = hasher.digest()
 
@@ -408,10 +442,18 @@ class DocumentClassifier:
         self._update_data_vectorizer_hash()
         return True
 
-    def preprocess_content(self, content: str) -> str:  # pragma: no cover
+    def preprocess_content(
+        self,
+        content: str,
+        *,
+        set_cache=True,
+    ) -> str:  # pragma: no cover
         """
         Process to contents of a document, distilling it down into
         words which are meaningful to the content
+
+        A stemmer cache is shared across workers with the parameter "set_cache".
+        This is unnecessary when training the classifier.
         """
 
         # Lower case the document, reduce space,
@@ -427,7 +469,7 @@ class DocumentClassifier:
                 # This splits the content into tokens, roughly words
                 words = tokenize(content)
                 # Stem the words and skip stop words
-                result = " ".join([stem_and_skip_stop_word(w) for w in words])
+                result = stem_and_skip_stop_words(words, set_cache=set_cache)
 
                 return result
 

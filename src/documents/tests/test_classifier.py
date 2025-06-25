@@ -21,7 +21,7 @@ from documents.models import Tag
 from documents.tests.utils import DirectoriesMixin
 
 
-def dummy_preprocess(content: str):
+def dummy_preprocess(content: str, **kwargs):
     """
     Simpler, faster pre-processing for testing purposes
     """

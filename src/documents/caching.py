@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import pickle
 from binascii import hexlify
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from typing import Final
@@ -38,6 +40,26 @@ CLASSIFIER_MODIFIED_KEY: Final[str] = "classifier_modified"
 CACHE_1_MINUTE: Final[int] = 60
 CACHE_5_MINUTES: Final[int] = 5 * CACHE_1_MINUTE
 CACHE_50_MINUTES: Final[int] = 50 * CACHE_1_MINUTE
+
+
+def get_stemmer_cache_key() -> str:
+    """
+    Returns the basic key for a document's metadata
+    """
+    return "stemmer_cache"
+
+
+def get_stemmer_cache() -> OrderedDict:
+    key = get_stemmer_cache_key()
+    stemmer_pickle = cache.get(key)
+    stemmer_data = pickle.loads(stemmer_pickle) if stemmer_pickle else OrderedDict()
+    return stemmer_data
+
+
+def set_stemmer_cache(stemmer_data: OrderedDict, timeout=CACHE_50_MINUTES) -> None:
+    key = get_stemmer_cache_key()
+    stemmer_pickle = pickle.dumps(stemmer_data)
+    cache.set(key, stemmer_pickle, timeout=timeout)
 
 
 def get_suggestion_cache_key(document_id: int) -> str:
