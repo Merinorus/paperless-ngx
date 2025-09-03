@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from time import mktime
 from typing import Literal
@@ -205,6 +206,32 @@ if settings.AUDIT_LOG_ENABLED:
     from auditlog.models import LogEntry
 
 logger = logging.getLogger("paperless.api")
+
+
+def cache_if_specific_version_only(*, max_age=31536000, private=False):
+    """
+    Add a long cache control strategy only if a specified version ("?v=" query param) is in the request.
+    """
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, request, *args, **kwargs):
+            response = func(self, request, *args, **kwargs)
+            if response is not None:
+                parts = list()
+                if "v" in request.query_params:
+                    parts.append(f"max-age={max_age}")
+                    parts.append("immutable")
+                    if private:
+                        parts.append("private")
+                else:
+                    parts.append("no-cache")
+                response["Cache-Control"] = ", ".join(parts)
+            return response
+
+        return wrapper
+
+    return decorator
 
 
 class IndexView(TemplateView):
@@ -1015,7 +1042,7 @@ class DocumentViewSet(
             raise Http404
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @cache_if_specific_version_only(private=True)
     @method_decorator(last_modified(thumbnail_last_modified))
     def thumb(self, request, pk=None):
         try:
