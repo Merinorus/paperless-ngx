@@ -14,6 +14,7 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.db import transaction
+from django.db.models import prefetch_related_objects
 from django.db.models.signals import post_save
 from django.utils import timezone
 from filelock import FileLock
@@ -67,14 +68,32 @@ def index_optimize():
     writer.commit(optimize=True)
 
 
-def index_reindex(*, progress_bar_disable=False):
-    documents = Document.objects.all()
+def index_reindex(*, progress_bar_disable=False) -> None:
+    total = Document.objects.count()
+    chunk_size = 1000  # Load docs from DB in RAM by chunks
 
-    ix = index.open_index(recreate=True)
+    base_qs = Document.objects.select_related(
+        "correspondent",
+        "document_type",
+        "storage_path",
+        "owner",
+    ).order_by("pk")
 
-    with AsyncWriter(ix) as writer:
-        for document in tqdm.tqdm(documents, disable=progress_bar_disable):
-            index.update_document(writer, document)
+    with index.open_index_writer() as writer:
+        with tqdm.tqdm(total=total, disable=progress_bar_disable) as progress_bar:
+            last_pk = 0
+            while True:
+                chunk = list(base_qs.filter(pk__gt=last_pk)[:chunk_size])
+                if not chunk:
+                    break
+
+                prefetch_related_objects(chunk, "tags", "notes", "custom_fields__field")
+
+                for document in chunk:
+                    index.update_document(writer, document)
+                    progress_bar.update(1)
+
+                last_pk = chunk[-1].pk
 
 
 @shared_task
