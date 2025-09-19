@@ -1,173 +1,295 @@
 from __future__ import annotations
 
+import bisect
 import logging
 import math
+import os
 import re
-from collections import Counter
+import threading
+import unicodedata
+from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import time
 from datetime import timedelta
 from datetime import timezone
+from functools import lru_cache
+from pathlib import Path
 from shutil import rmtree
-from time import sleep
 from typing import TYPE_CHECKING
 from typing import Literal
 
+import tantivy
 from dateutil.relativedelta import relativedelta
 from django.conf import settings
 from django.utils import timezone as django_timezone
 from django.utils.timezone import get_current_timezone
 from django.utils.timezone import now
 from guardian.shortcuts import get_users_with_perms
-from whoosh import classify
-from whoosh import highlight
-from whoosh import query
-from whoosh.fields import BOOLEAN
-from whoosh.fields import DATETIME
-from whoosh.fields import KEYWORD
-from whoosh.fields import NUMERIC
-from whoosh.fields import TEXT
-from whoosh.fields import Schema
-from whoosh.highlight import HtmlFormatter
-from whoosh.idsets import BitSet
-from whoosh.idsets import DocIdSet
-from whoosh.index import FileIndex
-from whoosh.index import LockError
-from whoosh.index import create_in
-from whoosh.index import exists_in
-from whoosh.index import open_dir
-from whoosh.qparser import MultifieldParser
-from whoosh.qparser import QueryParser
 from whoosh.qparser.dateparse import DateParserPlugin
 from whoosh.qparser.dateparse import English
-from whoosh.qparser.plugins import FieldsPlugin
-from whoosh.scoring import TF_IDF
 from whoosh.util.times import timespan
-from whoosh.writing import AsyncWriter
 
-from documents.models import CustomFieldInstance
 from documents.models import Document
-from documents.models import Note
 from documents.models import User
 
 if TYPE_CHECKING:
     from django.db.models import QuerySet
-    from whoosh.reading import IndexReader
     from whoosh.searching import ResultsPage
-    from whoosh.searching import Searcher
 
 logger = logging.getLogger("paperless.index")
+index_dir = f"{settings.INDEX_DIR}_tantivy"
+
+CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+")
+WORD_RE = re.compile(r"\w+", flags=re.IGNORECASE)
+
+MAX_RESULT_LIMIT = 1001
 
 
-def get_schema() -> Schema:
-    return Schema(
-        id=NUMERIC(stored=True, unique=True),
-        title=TEXT(sortable=True),
-        content=TEXT(),
-        asn=NUMERIC(sortable=True, signed=False),
-        correspondent=TEXT(sortable=True),
-        correspondent_id=NUMERIC(),
-        has_correspondent=BOOLEAN(),
-        tag=KEYWORD(commas=True, scorable=True, lowercase=True),
-        tag_id=KEYWORD(commas=True, scorable=True),
-        has_tag=BOOLEAN(),
-        type=TEXT(sortable=True),
-        type_id=NUMERIC(),
-        has_type=BOOLEAN(),
-        created=DATETIME(sortable=True),
-        modified=DATETIME(sortable=True),
-        added=DATETIME(sortable=True),
-        path=TEXT(sortable=True),
-        path_id=NUMERIC(),
-        has_path=BOOLEAN(),
-        notes=TEXT(),
-        num_notes=NUMERIC(sortable=True, signed=False),
-        custom_fields=TEXT(),
-        custom_field_count=NUMERIC(sortable=True, signed=False),
-        has_custom_fields=BOOLEAN(),
-        custom_fields_id=KEYWORD(commas=True),
-        owner=TEXT(),
-        owner_id=NUMERIC(),
-        has_owner=BOOLEAN(),
-        viewer_id=KEYWORD(commas=True),
-        checksum=TEXT(),
-        page_count=NUMERIC(sortable=True),
-        original_filename=TEXT(sortable=True),
-        is_shared=BOOLEAN(),
+def extract_bigram_content(text: str) -> str:
+    """
+    Extract relevant bigrams from a given text.
+
+    This is used for languages that cannot be properly indexed with simple tokenizer,
+    such as CJK languages.
+    """
+    cjk_sequences = CJK_RE.findall(text)
+    return " ".join(cjk_sequences)
+
+
+# In Tantivy, a text analyzer is a pipeline of
+# a tokenizer, optionally followed by filters.
+bigram_analyzer: tantivy.TextAnalyzer = (
+    tantivy.TextAnalyzerBuilder(
+        tantivy.Tokenizer.ngram(2, 2),
     )
+    .filter(tantivy.Filter.lowercase())
+    .build()
+)
+
+# Remove words longer than 64 characters, make the fields case AND diacritic insensitive
+simple_analyzer: tantivy.TextAnalyzer = (
+    tantivy.TextAnalyzerBuilder(
+        tantivy.Tokenizer.simple(),
+    )
+    .filter(tantivy.Filter.remove_long(65))
+    .filter(tantivy.Filter.lowercase())
+    .filter(tantivy.Filter.ascii_fold())
+    .build()
+)
 
 
-def open_index(*, recreate=False) -> FileIndex:
-    transient_exceptions = (FileNotFoundError, LockError)
-    max_retries = 3
-    retry_delay = 0.1
+@lru_cache(maxsize=1)
+def get_schema():
+    """
+    Prepare the Tantivy index schema.
 
-    for attempt in range(max_retries + 1):
+    index_options: for text fields. "position" is default (frequency and position), "frequency" or "basic".
+    stored: whether the field is stored and can be retrieved directly.
+    fast: whether the field is stored in a columnar fashion, needed for sorting.
+    indexed: needed for integer fields to be searchable.
+    """
+    sb = tantivy.SchemaBuilder()
+    # TODO are all the has_ really needed?
+    sb.add_integer_field("id", stored=True, indexed=True)
+    sb.add_text_field("title", stored=True, fast=True, index_option="basic")
+    sb.add_text_field(
+        "autocomplete_word",
+        stored=True,
+        index_option="basic",
+        tokenizer_name="simple_analyzer",
+    )  # Alphabetically sorted list
+    sb.add_text_field("content", stored=True, tokenizer_name="simple_analyzer")
+    sb.add_text_field(
+        "bigram_content",
+        tokenizer_name="bigram_analyzer",
+        index_option="freq",
+    )  # used for languages such as CJK
+    sb.add_integer_field("asn", stored=True, fast=True)
+    sb.add_text_field("correspondent", stored=True, fast=True, tokenizer_name="default")
+    sb.add_integer_field("correspondent_id", stored=True)
+    sb.add_boolean_field("has_correspondent", stored=True)
+    sb.add_text_field("tag", stored=True, tokenizer_name="simple_analyzer")
+    sb.add_integer_field("tag_id", stored=True)
+    sb.add_boolean_field("has_tag", stored=True)
+    sb.add_text_field("type", stored=True, fast=True, tokenizer_name="default")
+    sb.add_integer_field("type_id", stored=True)
+    sb.add_boolean_field("has_type", stored=True)
+    sb.add_date_field(
+        "created",
+        stored=True,
+        fast=True,
+        indexed=True,
+    )  # Indexed dates must be timezone-naive datetimes
+    sb.add_date_field("modified", stored=True, fast=True, indexed=True)
+    sb.add_date_field("added", stored=True, fast=True, indexed=True)
+    sb.add_text_field("path", stored=True)
+    sb.add_integer_field("path_id", stored=True)
+    sb.add_boolean_field("has_path", stored=True)
+    sb.add_text_field("notes", stored=True, tokenizer_name="simple_analyzer")
+    sb.add_integer_field("num_notes", stored=True, fast=True)
+    sb.add_text_field("custom_fields", stored=True, tokenizer_name="simple_analyzer")
+    sb.add_integer_field("custom_field_count", stored=True)
+    sb.add_integer_field("custom_fields_id", stored=True)
+    sb.add_boolean_field("has_custom_fields", stored=True)
+    sb.add_text_field("owner", stored=True, fast=True)
+    sb.add_integer_field("owner_id", stored=True, indexed=True)
+    sb.add_boolean_field("has_owner", indexed=True)
+    sb.add_integer_field("viewer_id", stored=True, indexed=True)
+    sb.add_text_field("checksum", stored=True, index_option="basic")
+    sb.add_integer_field("page_count", stored=True, fast=True)
+    sb.add_text_field("original_filename", stored=True)
+    sb.add_boolean_field("is_shared", stored=True)
+    return sb.build()
+
+
+def recreate_index_dir(path=index_dir):
+    if Path(path).exists():
+        rmtree(path)
+    Path(path).mkdir(parents=True, exist_ok=True)
+
+
+@contextmanager
+def open_index(*, recreate=False, reload=True):
+    path = index_dir
+    if recreate or not Path(path).exists():
+        recreate_index_dir(path)
+    try:
+        index = tantivy.Index(schema=get_schema(), path=path)
+        index.register_tokenizer("bigram_analyzer", bigram_analyzer)
+        index.register_tokenizer("simple_analyzer", simple_analyzer)
+    except ValueError as e:
+        # Schema has changed
+        logger.warning(f"Recreating index due to error: {e}")
+        recreate_index_dir(path)
+        index = tantivy.Index(schema=get_schema(), path=path)
+    if reload:
+        index.reload()  # Ensure we have the latest commit?
+    yield index
+
+
+class AsyncWriter(threading.Thread):
+    LOCK_EXC_MSG = "Failed to acquire Lockfile"
+
+    def __init__(self, index: tantivy.Index, delay=0.25, **writerargs):
+        """
+        Asynchronous writer for tantivy, inspired from Whoosh's AsyncWriter.
+
+        :param index: the :class:`whoosh.index.Index` to write to.
+        :param delay: the delay (in seconds) between attempts to instantiate
+            the actual writer.
+        :param writerargs: an optional dictionary specifying keyword arguments
+            to to be passed to the index's ``writer()`` method.
+        """
+        threading.Thread.__init__(self)
+        self.running = False
+        self.index = index
+        self.writerargs = writerargs or {}
+        self.delay = delay
+        self.events = []
         try:
-            if exists_in(settings.INDEX_DIR) and not recreate:
-                return open_dir(settings.INDEX_DIR, schema=get_schema())
-            break
-        except transient_exceptions as exc:
-            is_last_attempt = attempt == max_retries or recreate
-            if is_last_attempt:
-                logger.exception(
-                    "Error while opening the index after retries, recreating.",
-                )
-                break
+            self.writer = self.index.writer(**self.writerargs)
+        except ValueError as e:
+            if self.LOCK_EXC_MSG in str(e):
+                self.writer = None
+            else:
+                raise
 
-            logger.warning(
-                "Transient error while opening the index (attempt %s/%s): %s. Retrying.",
-                attempt + 1,
-                max_retries + 1,
-                exc,
-            )
-            sleep(retry_delay)
-        except Exception:
-            logger.exception("Error while opening the index, recreating.")
-            break
+    def _record(self, method, *args, **kwargs):
+        if self.writer:
+            getattr(self.writer, method)(*args, **kwargs)
+        else:
+            self.events.append((method, args, kwargs))
 
-    # create_in doesn't handle corrupted indexes very well, remove the directory entirely first
-    if settings.INDEX_DIR.is_dir():
-        rmtree(settings.INDEX_DIR)
-    settings.INDEX_DIR.mkdir(parents=True, exist_ok=True)
+    def run(self):
+        self.running = True
+        writer = self.writer
+        while writer is None:
+            try:
+                writer = self.index.writer(**self.writerargs)
+            except ValueError as e:
+                if self.LOCK_EXC_MSG in str(e):
+                    import time as stime
 
-    return create_in(settings.INDEX_DIR, get_schema())
+                    stime.sleep(self.delay)
+                else:
+                    raise
+        for method, args, kwargs in self.events:
+            getattr(writer, method)(*args, **kwargs)
+        writer.commit(*self.commitargs, **self.commitkwargs)
+        writer.wait_merging_threads()
+
+    def delete_documents_by_query(self, *args, **kwargs):
+        self._record("delete_documents_by_query", *args, **kwargs)
+
+    def add_document(self, *args, **kwargs):
+        self._record("add_document", *args, **kwargs)
+
+    def commit_and_wait_merging_threads(self, *args, **kwargs):
+        if self.writer:
+            self.writer.commit(*args, **kwargs)
+            self.writer.wait_merging_threads()
+        else:
+            self.commitargs, self.commitkwargs = args, kwargs
+            self.start()
+        if self.is_alive():
+            self.join()
+
+    def rollback(self, *args, **kwargs):
+        if self.writer:
+            return self.writer.rollback(*args, **kwargs)
+        # If we never acquired the writer, drop buffered events
+        self.events.clear()
+        # If a background thread is running, we can't reliably abort tantivy's writer
+        # but dropping events is the best effort here.
 
 
 @contextmanager
-def open_index_writer(*, optimize=False) -> AsyncWriter:
-    writer = AsyncWriter(open_index())
-
-    try:
-        yield writer
-    except Exception as e:
-        logger.exception(str(e))
-        writer.cancel()
-    finally:
-        writer.commit(optimize=optimize)
+def open_index_writer(*, reload=True, **kwargs):
+    with open_index(reload=reload) as index:
+        writer = AsyncWriter(index, num_threads=os.cpu_count() or 0)
+        try:
+            yield writer
+        except Exception as e:
+            logger.exception(str(e))
+            writer.rollback()
+        finally:
+            writer.commit_and_wait_merging_threads()
 
 
 @contextmanager
-def open_index_searcher() -> Searcher:
-    searcher = open_index().searcher()
-
-    try:
-        yield searcher
-    finally:
-        searcher.close()
+def open_index_searcher():
+    with open_index() as index:
+        index.config_reader(reload_policy="commit")
+        yield index.searcher()
 
 
-def update_document(writer: AsyncWriter, doc: Document) -> None:
-    tags = ",".join([t.name for t in doc.tags.all()])
-    tags_ids = ",".join([str(t.id) for t in doc.tags.all()])
-    notes = ",".join([str(c.note) for c in Note.objects.filter(document=doc)])
-    custom_fields = ",".join(
-        [str(c) for c in CustomFieldInstance.objects.filter(document=doc)],
-    )
-    custom_fields_ids = ",".join(
-        [str(f.field.id) for f in CustomFieldInstance.objects.filter(document=doc)],
-    )
+def tokenize_for_autocomplete(text: str):
+    """Return all distinct autocomplete words from a given text."""
+    return {m.group(0).lower() for m in WORD_RE.finditer(text)}
+
+
+def datetime_to_tantivy(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if not isinstance(dt, datetime):
+        raise TypeError(f"Expected datetime, got {type(dt)}")
+    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def update_document(
+    writer: tantivy.IndexWriter,
+    doc: Document,
+    effective_content: str | None = None,
+) -> None:
+    tag_list = list(doc.tags.all())
+    tags = ",".join([t.name for t in tag_list])
+    tags_ids = [t.id for t in tag_list]
+    notes = ",".join([str(n.note) for n in doc.notes.all()])
+    custom_field_list = list(doc.custom_fields.all())
+    custom_fields = ",".join([str(c) for c in custom_field_list])
+    custom_fields_ids = [f.field.id for f in custom_field_list]
     asn: int | None = doc.archive_serial_number
     if asn is not None and (
         asn < Document.ARCHIVE_SERIAL_NUMBER_MIN
@@ -184,51 +306,72 @@ def update_document(writer: AsyncWriter, doc: Document) -> None:
         doc,
         only_with_perms_in=["view_document"],
     )
-    viewer_ids: str = ",".join([str(u.id) for u in users_with_perms])
-    writer.update_document(
+    viewer_ids = [int(u.id) for u in users_with_perms]
+
+    writer.delete_documents_by_query(
+        tantivy.Query.term_query(get_schema(), "id", doc.pk),
+    )
+    indexed_doc = tantivy.Document(
         id=doc.pk,
-        title=doc.title,
-        content=doc.content,
-        correspondent=doc.correspondent.name if doc.correspondent else None,
-        correspondent_id=doc.correspondent.id if doc.correspondent else None,
+        title=doc.title or "",
+        content=effective_content or doc.content,
+        bigram_content=extract_bigram_content(effective_content or doc.content),
+        correspondent=doc.correspondent.name if doc.correspondent else "",
+        correspondent_id=doc.correspondent.id if doc.correspondent else 0,
         has_correspondent=doc.correspondent is not None,
-        tag=tags if tags else None,
-        tag_id=tags_ids if tags_ids else None,
         has_tag=len(tags) > 0,
-        type=doc.document_type.name if doc.document_type else None,
-        type_id=doc.document_type.id if doc.document_type else None,
+        type=doc.document_type.name if doc.document_type else "",
+        type_id=doc.document_type.id if doc.document_type else 0,
         has_type=doc.document_type is not None,
-        created=datetime.combine(doc.created, time.min),
-        added=doc.added,
-        asn=asn,
-        modified=doc.modified,
-        path=doc.storage_path.name if doc.storage_path else None,
-        path_id=doc.storage_path.id if doc.storage_path else None,
+        created=datetime_to_tantivy(datetime.combine(doc.created, time.min)),
+        added=datetime_to_tantivy(doc.added),
+        asn=asn or 0,
+        modified=datetime_to_tantivy(doc.modified),
+        path=doc.storage_path.name if doc.storage_path else "",
+        path_id=doc.storage_path.id if doc.storage_path else 0,
         has_path=doc.storage_path is not None,
-        notes=notes,
+        notes=notes or "",
         num_notes=len(notes),
-        custom_fields=custom_fields,
-        custom_field_count=len(doc.custom_fields.all()),
+        custom_fields=custom_fields or "",
+        custom_field_count=len(custom_field_list),
         has_custom_fields=len(custom_fields) > 0,
-        custom_fields_id=custom_fields_ids if custom_fields_ids else None,
-        owner=doc.owner.username if doc.owner else None,
-        owner_id=doc.owner.id if doc.owner else None,
-        has_owner=doc.owner is not None,
-        viewer_id=viewer_ids if viewer_ids else None,
-        checksum=doc.checksum,
-        page_count=doc.page_count,
+        owner=doc.owner.username if doc.owner else "",
+        owner_id=int(doc.owner.id if doc.owner and doc.owner.id else 0),
+        has_owner=bool(doc.owner and doc.owner.id is not None),
+        checksum=doc.checksum or "",
+        page_count=doc.page_count or 0,
         original_filename=doc.original_filename,
         is_shared=len(viewer_ids) > 0,
     )
+    for tag_id in tags_ids:
+        indexed_doc.add_integer("tag_id", tag_id)
+    for custom_fields_id in custom_fields_ids:
+        indexed_doc.add_integer("custom_fields_id", custom_fields_id)
+    for viewer_id in viewer_ids:
+        indexed_doc.add_integer("viewer_id", viewer_id)
+
+    autocomplete_words = tokenize_for_autocomplete(doc.content)
+
+    # Add also title and note content for autocomplete
+    autocomplete_words.update(tokenize_for_autocomplete(doc.title))
+    autocomplete_words.update(tokenize_for_autocomplete(notes))
+
+    # Make sure to sort the autocomplete word lists.
+    # We assume it's sorted for autocomplete search function.
+    for word in sorted(autocomplete_words):
+        indexed_doc.add_text("autocomplete_word", word)
+    writer.add_document(indexed_doc)
     logger.debug(f"Index updated for document {doc.pk}.")
 
 
-def remove_document(writer: AsyncWriter, doc: Document) -> None:
+def remove_document(writer: tantivy.IndexWriter, doc: Document) -> None:
     remove_document_by_id(writer, doc.pk)
 
 
-def remove_document_by_id(writer: AsyncWriter, doc_id) -> None:
-    writer.delete_by_term("id", doc_id)
+def remove_document_by_id(writer: tantivy.IndexWriter, doc_id) -> None:
+    writer.delete_documents_by_query(
+        tantivy.Query.term_query(get_schema(), "id", doc_id),
+    )
 
 
 def add_or_update_document(document: Document) -> None:
@@ -236,32 +379,128 @@ def add_or_update_document(document: Document) -> None:
         update_document(writer, document)
 
 
+def add_or_update_documents(documents: list[Document], batchsize=0) -> None:
+    if batchsize <= 0:
+        with open_index_writer() as writer:
+            for document in documents:
+                update_document(writer, document)
+    else:
+        for i in range(0, len(documents), batchsize):
+            batch = documents[i : i + batchsize]
+            # do stuff with batch
+            with open_index_writer() as writer:
+                for document in batch:
+                    update_document(writer, document)
+
+
 def remove_document_from_index(document: Document) -> None:
     with open_index_writer() as writer:
         remove_document(writer, document)
 
 
-class MappedDocIdSet(DocIdSet):
+class MappedDocIdSet:
+    def __init__(self, filter_queryset: QuerySet):
+        self.document_ids = set(filter_queryset.values_list("id", flat=True))
+
+    def filter(self, results):
+        # results : list of tantivy.Document
+        return [r for r in results if r.get("id") in self.document_ids]
+
+
+class ResultsPage:
+    """Tantivy result page"""
+
+    results: list
+    pagelen: int
+    pagenum: int
+    total: int
+
+    def __init__(self, results, pagelen, pagenum, total):
+        self.results = results
+        self.pagelen = pagelen
+        self.pagenum = pagenum
+        self.total = total
+
+
+class Hit:
+    def __init__(
+        self,
+        id,
+        score,
+        rank=None,
+        content=None,
+        highlights=None,
+        note_highlights=None,
+    ):
+        self.id: int = id
+        self.score: float = score
+        self.rank: int = rank
+        self.content: str = content
+        self._highlights: str = highlights
+        self._note_highlights: str = note_highlights
+
+    def __getitem__(self, key):
+        if key == "id":
+            return self.id
+        raise KeyError(key)
+
+    def highlights(self, field, *args, **kwargs):
+        text = self._note_highlights if field == "notes" else self._highlights
+        result = text.replace("<b>", '<span class="match">').replace(
+            "</b>",
+            "</span>",
+        )
+        return result
+
+    def __repr__(self):
+        return f"Hit(id={self.id}, score={self.score}, rank={self.rank})"
+
+
+class TantivyResultsPage:
     """
-    A DocIdSet backed by a set of `Document` IDs.
-    Supports efficiently looking up if a whoosh docnum is in the provided `filter_queryset`.
-    """
+    Taken from Whoosh ResultsPage object, for use with Tantivy.
 
-    def __init__(self, filter_queryset: QuerySet, ixreader: IndexReader) -> None:
-        super().__init__()
-        document_ids = filter_queryset.order_by("id").values_list("id", flat=True)
-        max_id = document_ids.last() or 0
-        self.document_ids = BitSet(document_ids, size=max_id)
-        self.ixreader = ixreader
+    This contains all results, but with a pagination system."""
 
-    def __contains__(self, docnum) -> bool:
-        document_id = self.ixreader.stored_fields(docnum)["id"]
-        return document_id in self.document_ids
+    def __init__(self, results: list[Hit], pagenum, pagelen):
+        self.results = results
+        self.total = len(results)
 
-    def __bool__(self) -> Literal[True]:
-        # searcher.search ignores a filter if it's "falsy".
-        # We use this hack so this DocIdSet, when used as a filter, is never ignored.
-        return True
+        if pagenum < 1:
+            raise ValueError("pagenum must be >= 1")
+
+        self.pagecount = math.ceil(self.total / pagelen)
+        self.pagenum = min(self.pagecount, pagenum)
+        offset = (self.pagenum - 1) * pagelen
+        if (offset + pagelen) > self.total:
+            pagelen = self.total - offset
+        self.offset = offset
+        self.pagelen = pagelen
+
+    def __getitem__(self, n):
+        offset = self.offset
+        if isinstance(n, slice):
+            start, stop, step = n.indices(self.pagelen)
+            return self.results.__getitem__(slice(start + offset, stop + offset, step))
+        else:
+            return self.results.__getitem__(n + offset)
+
+    def __iter__(self):
+        return iter(self.results[self.offset : self.offset + self.pagelen])
+
+    def __len__(self):
+        return self.total
+
+    def docnum(self, n):
+        """Returns the document number of the hit at the nth position on this
+        page.
+        """
+        return self.results.docnum(n + self.offset)
+
+    @property
+    def doc_ids(self):
+        """Return the DB ids of the documents in the result page"""
+        return [result.id for result in self.results]
 
 
 class DelayedQuery:
@@ -298,12 +537,18 @@ class DelayedQuery:
         else:
             return sort_fields_map[field], reverse
 
+    def _manual_sort_requested(self):
+        # See https://github.com/paperless-ngx/paperless-ngx/pull/11383
+        # Tantivy implementation was done before this PR. Needs to implement.
+        return False
+
     def __init__(
         self,
-        searcher: Searcher,
+        searcher: tantivy.Searcher,
         query_params,
         page_size,
         filter_queryset: QuerySet,
+        user=None,
     ) -> None:
         self.searcher = searcher
         self.query_params = query_params
@@ -312,7 +557,7 @@ class DelayedQuery:
         self.first_score = None
         self.filter_queryset = filter_queryset
         self.suggested_correction = None
-        self._manual_hits_cache: list | None = None
+        self.user = user
 
     def __len__(self) -> int:
         if self._manual_sort_requested():
@@ -322,53 +567,10 @@ class DelayedQuery:
         page = self[0:1]
         return len(page)
 
-    def _manual_sort_requested(self):
-        ordering = self.query_params.get("ordering", "")
-        return ordering.lstrip("-").startswith("custom_field_")
+    def __getitem__(self, item: slice):
+        import time
 
-    def _manual_hits(self):
-        if self._manual_hits_cache is None:
-            q, mask, suggested_correction = self._get_query()
-            self.suggested_correction = suggested_correction
-
-            results = self.searcher.search(
-                q,
-                mask=mask,
-                filter=MappedDocIdSet(self.filter_queryset, self.searcher.ixreader),
-                limit=None,
-            )
-            results.fragmenter = highlight.ContextFragmenter(surround=50)
-            results.formatter = HtmlFormatter(tagname="span", between=" ... ")
-
-            if not self.first_score and len(results) > 0:
-                self.first_score = results[0].score
-
-            if self.first_score:
-                results.top_n = [
-                    (
-                        (hit[0] / self.first_score) if self.first_score else None,
-                        hit[1],
-                    )
-                    for hit in results.top_n
-                ]
-
-            hits_by_id = {hit["id"]: hit for hit in results}
-            matching_ids = list(hits_by_id.keys())
-
-            ordered_ids = list(
-                self.filter_queryset.filter(id__in=matching_ids).values_list(
-                    "id",
-                    flat=True,
-                ),
-            )
-            ordered_ids = list(dict.fromkeys(ordered_ids))
-
-            self._manual_hits_cache = [
-                hits_by_id[_id] for _id in ordered_ids if _id in hits_by_id
-            ]
-        return self._manual_hits_cache
-
-    def __getitem__(self, item):
+        t0 = time.time()
         if item.start in self.saved_results:
             return self.saved_results[item.start]
 
@@ -382,34 +584,112 @@ class DelayedQuery:
             return page
 
         q, mask, suggested_correction = self._get_query()
+        print(q)
         self.suggested_correction = suggested_correction
-        sortedby, reverse = self._get_query_sortedby()
 
-        page: ResultsPage = self.searcher.search_page(
+        sortedby, reverse = self._get_query_sortedby()
+        order = tantivy.Order.Desc if reverse else tantivy.Order.Asc
+        if isinstance(self, DelayedMoreLikeThisQuery) and sortedby not in [
+            "score",
+            None,
+        ]:
+            # Special case: "more like this" query doesn't support sort and order
+            # So we fetch the IDs of the corresponding items,
+            # then query by theirs IDs to be able to sort them.
+            search_result = self.searcher.search(
+                q,
+                limit=MAX_RESULT_LIMIT,  # TODO set limit for performance?
+            ).hits
+            more_like_this_ids = list()
+            for _, doc_addr in search_result:
+                doc = self.searcher.doc(doc_addr)
+                doc_id = doc["id"][0]
+                more_like_this_ids.append(doc_id)
+            q = tantivy.Query.term_set_query(
+                get_schema(),
+                "id",
+                more_like_this_ids,
+            )
+
+        pagenum = math.floor(item.start / self.page_size) + 1
+        pagelen = self.page_size
+        # offset = (pagenum - 1) * pagelen
+        # print(f"offset: {offset}")
+        t1 = time.time()
+        search_result = self.searcher.search(
             q,
-            mask=mask,
-            filter=MappedDocIdSet(self.filter_queryset, self.searcher.ixreader),
+            # limit=pagelen+1,
+            limit=MAX_RESULT_LIMIT,  # TODO set limit for performance?
+            offset=(pagenum - 1) * pagelen,
+            order_by_field=sortedby,
+            order=order,
+        ).hits
+        # print(f"query and tantivy search took {time.time() - t1:.3f} seconds")
+        results = list()
+        # print(2)
+        # if self.filter_queryset:
+        if self.filter_queryset is not None:
+            # print(3)
+            # print(self.filter_queryset)
+            # print(self.filter_queryset.query)
+            t1 = time.time()
+            allowed_ids = set(self.filter_queryset.values_list("id", flat=True))
+            # print(f"DB query took {time.time() - t1:.3f} seconds")
+            # print(3.1)
+            # print(search_result)
+            content_snippet_generator = tantivy.SnippetGenerator.create(
+                self.searcher,
+                q,
+                get_schema(),
+                "content",
+            )
+            content_snippet_generator.set_max_num_chars(550)
+            note_snippet_generator = tantivy.SnippetGenerator.create(
+                self.searcher,
+                q,
+                get_schema(),
+                "notes",
+            )
+            note_snippet_generator.set_max_num_chars(100)
+            results = list()
+            hit_scores = defaultdict(float)  # doc_id -> max score
+            for score, doc_addr in search_result:
+                doc = self.searcher.doc(doc_addr)
+                doc_id = doc["id"][0]
+                if doc_id in allowed_ids:
+                    # print(3.3)
+                    # results.append({"id": doc["id"][0], "score": score})
+                    hit_scores[doc_id] = max(hit_scores[doc_id], score)
+                    # results.append(Hit(doc["id"][0], score))
+                    # print(3.4)
+
+                    # Generate highlights
+                    content_snippet = content_snippet_generator.snippet_from_doc(doc)
+                    note_snippet = note_snippet_generator.snippet_from_doc(doc)
+
+                    results.append(
+                        Hit(
+                            doc["id"][0],
+                            score,
+                            content=content_snippet.fragment(),
+                            highlights=content_snippet.to_html(),
+                            note_highlights=note_snippet.to_html(),
+                        ),
+                    )
+
+            for idx, hit in enumerate(results, start=1):
+                hit.rank = idx
+
+        else:
+            # TODO
+            raise NotImplementedError
+
+        page = TantivyResultsPage(
+            results=results,
             pagenum=math.floor(item.start / self.page_size) + 1,
             pagelen=self.page_size,
-            sortedby=sortedby,
-            reverse=reverse,
         )
-        page.results.fragmenter = highlight.ContextFragmenter(surround=50)
-        page.results.formatter = HtmlFormatter(tagname="span", between=" ... ")
-
-        if not self.first_score and len(page.results) > 0 and sortedby is None:
-            self.first_score = page.results[0].score
-
-        page.results.top_n = [
-            (
-                (hit[0] / self.first_score) if self.first_score else None,
-                hit[1],
-            )
-            for hit in page.results.top_n
-        ]
-
         self.saved_results[item.start] = page
-
         return page
 
 
@@ -443,40 +723,311 @@ class LocalDateParser(English):
         return d
 
 
+date_parser_plugin = DateParserPlugin(
+    basedate=django_timezone.now(),
+    dateparser=LocalDateParser(),
+)
+
+
+def parse_natural_date(expr: str):
+    """
+    Parse une expression de date naturelle en utilisant le parser anglais de Whoosh.
+    Retourne (start, end).
+    """
+
+    result = date_parser_plugin.dateparser.date_from(expr)
+
+    if not result:
+        return (None, None)
+
+    if isinstance(result, timespan):
+        return result.start, result.end
+    else:
+        raise RuntimeError(f"Unexpected result type: {type(result)}")
+
+
+DATE_FIELDS = ["created", "added", "modified"]
+DATE_QUERY_RE = re.compile(
+    r"""
+    (?P<field>\w+)                    # field ex: created
+    \s*:\s*                           # separator ":"
+    (?P<op>>=|<=|>|<)?\s*             # optional operator
+    (                                 #
+        (?P<bracket_expr>             #   if [expr]
+            \[[^\[\]]*\]
+        )
+        |                             #   or
+        (?P<quoted_expr>              #   expr' or "expr"
+            ['"][^'"]*['"]
+        )
+        |                             #   or
+        (?P<bare_expr>                #   simple expression
+            [^\],'\"]+?
+        )
+    )
+    (?=(?:\s+|,)\w+\s*:|$)            # stop at next field, comma or end
+    """,
+    flags=re.IGNORECASE | re.VERBOSE,
+)
+
+
+def replace_date_expr(match, date_fields=DATE_FIELDS):
+    field = match.group("field").strip()
+    operator = match.group("op") or ""
+    expr = (
+        match.group("bracket_expr")
+        or match.group("quoted_expr")
+        or match.group("bare_expr")
+    )
+    expr = expr.strip("[]'\" ").strip()
+
+    # ignore non-date fields
+    if field not in date_fields:
+        return match.group(0)
+
+    # parse date expression
+    try:
+        start, end = parse_natural_date(expr)
+    except Exception as e:
+        print(f"⚠️ parse_natural_date failed for {expr}: {e}")
+        return match.group(0)
+
+    # si parse_natural_date a renvoyé None
+    if not start and not end:
+        return match.group(0)
+
+    # build Tantivy range
+    if operator in (">", ">="):
+        return f"{field}:[{start.isoformat()} TO *]"
+    elif operator in ("<", "<="):
+        return f"{field}:[* TO {end.isoformat()}]"
+    elif "to" in expr.lower():
+        return f"{field}:[{start.isoformat()} TO {end.isoformat()}]"
+    else:
+        return f"{field}:[{start.isoformat()} TO {end.isoformat()}]"
+
+
+# def preprocess_query_dates(query: str) -> str:
+#     # Convert quotes into brackets first
+#     query = re.sub(
+#         r"(\w+)\s*:\s*(['\"])(.+?)\2",
+#         lambda m: f"{m.group(1)}:[{m.group(3)}]",
+#         query,
+#     )
+
+#     # Replace date expressions
+#     return DATE_QUERY_RE.sub(replace_date_expr, query)
+
+
+def preprocess_query_dates(query: str, date_fields=DATE_FIELDS) -> str:
+    """
+    Only convert quoted expressions to [expr] for *date* fields,
+    then replace date expressions by parsed Tantivy ranges.
+    """
+
+    # Build an alternation of the date field names, e.g. "created|added|modified"
+    # Use re.IGNORECASE so fields are matched case-insensitively.
+    field_alternation = "|".join(map(re.escape, date_fields))
+    quoted_for_date_re = re.compile(
+        rf"(?i)\b(?P<field>{field_alternation})\s*:\s*(['\"])(?P<body>.+?)\2",
+    )
+
+    # Replace only quoted date fields: created:"today" -> created:[today]
+    query = quoted_for_date_re.sub(
+        lambda m: f"{m.group('field')}:[{m.group('body')}]",
+        query,
+    )
+
+    # Now run the main DATE_QUERY_RE substitution which will call replace_date_expr
+    # For re.sub with a function that needs extra args, use a lambda capturing date_fields.
+    return DATE_QUERY_RE.sub(
+        lambda m: replace_date_expr(m, date_fields=date_fields),
+        query,
+    )
+
+
+NQL_TOKENS = ["AND", "OR", "NOT", "TO", "+", "-", "(", ")", '"', "[", "]"]
+
+
+def rewrite_default_and_keywords(query_string: str) -> str:
+    """
+    Separate keywords by AND when natural query language isn't detected.
+    """
+    if not any(
+        [w in query_string for w in NQL_TOKENS],
+    ):
+        # No natural language detected, so separate by AND
+        query_string = re.sub(r"\s+", " AND ", query_string.strip())
+    return query_string
+
+
+# Known keywords in your search syntax
+KEYWORDS = [
+    "content",
+    "bigram_content",
+    "title",
+    "correspondent",
+    "tag",
+    "type",
+    "notes",
+    "custom_fields",
+    "added",
+    "created",
+    "modified",
+]
+
+
+def normalize_query(query: str) -> str:
+    """The front-end can send date filters after a comma.
+    This fixes this by replacing the comma by a "AND" condition with the rest of the query."""
+    # Split by commas
+    parts = [p.strip() for p in query.split(",") if p.strip()]
+
+    normalized_parts = []
+    free_text_parts = []
+
+    for part in parts:
+        # Check if it starts with a known keyword
+        if any(part.startswith(f"{kw}:") for kw in KEYWORDS):
+            # If we already collected free text, wrap it in parentheses
+            if free_text_parts:
+                normalized_parts.append(f"({' '.join(free_text_parts)})")
+                free_text_parts = []
+            normalized_parts.append(part)
+        else:
+            free_text_parts.append(part)
+
+    # Add remaining free text if any
+    if free_text_parts:
+        normalized_parts.append(f"({' '.join(free_text_parts)})")
+
+    # Join everything with AND
+    return " AND ".join(normalized_parts)
+
+
+FIELD_EXPR_RE = re.compile(
+    r"""
+    (?P<field>\w+)
+    \s*:\s*
+    (?P<value>
+        \[[^\[\]]*\]      # plage entre crochets
+        |
+        [^,\s]+           # ou valeur simple
+    )
+    (?:,|(?=\s|$))        # séparée par virgule ou escape/fin
+    """,
+    re.VERBOSE,
+)
+
+
+def extract_query_parts(query: str):
+    """Extract structured filters (field:value) and remaining free text."""
+    filters = []
+    consumed_spans = []
+
+    for match in FIELD_EXPR_RE.finditer(query):
+        field = match.group("field")
+        value = match.group("value")
+        filters.append((field, value))
+        consumed_spans.append(match.span())
+
+    # Remove all matched segments from the original string
+    free_text = query
+    for start, end in reversed(consumed_spans):
+        free_text = free_text[:start] + " " + free_text[end:]
+
+    # Normalize free text
+    text_terms = [
+        t
+        for t in re.findall(r"\w+(?:['’]\w+)?", free_text)  # Noqa RUF001
+        if t and t not in NQL_TOKENS
+    ]
+
+    return {"filters": filters, "text_terms": text_terms}
+
+
 class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         q_str = self.query_params["query"]
+        print(f"raw query: {q_str}")
+
+        q_str = normalize_query(q_str)
+        print(f"normalized query: {q_str}")
         q_str = rewrite_natural_date_keywords(q_str)
-        qp = MultifieldParser(
-            [
-                "content",
-                "title",
-                "correspondent",
-                "tag",
-                "type",
-                "notes",
-                "custom_fields",
-            ],
-            self.searcher.ixreader.schema,
-        )
-        qp.add_plugin(
-            DateParserPlugin(
-                basedate=django_timezone.now(),
-                dateparser=LocalDateParser(),
-            ),
-        )
-        q = qp.parse(q_str)
-        suggested_correction = None
-        try:
-            corrected = self.searcher.correct_query(q, q_str)
-            if corrected.string != q_str:
-                suggested_correction = corrected.string
-        except Exception as e:
-            logger.info(
-                "Error while correcting query %s: %s",
-                f"{q_str!r}",
-                e,
+        print(f"with natural date keywords: {q_str}")
+
+        q_str = rewrite_default_and_keywords(q_str)
+        print(f"with default and keywords: {q_str}")
+        q_str = preprocess_query_dates(q_str)
+        print(f"with dates: {q_str}")
+        text_terms = extract_query_parts(q_str)["text_terms"]
+        print(f"text terms: {text_terms}")
+        if not settings.TANTIVY_FAST_MODE and any([len(t) >= 4 for t in text_terms]):
+            fuzzy_search = True
+        else:
+            fuzzy_search = False
+        # TODO: date parsing plugin like whoosh
+        with open_index() as index:
+            queries = list()
+            q = index.parse_query_lenient(
+                q_str,
+                [
+                    "content",
+                    "bigram_content",
+                    "title",
+                    "correspondent",
+                    "tag",
+                    "type",
+                    "notes",
+                    "custom_fields",
+                    "added",
+                    "created",
+                    "modified",
+                ],
+                field_boosts={"title": 5.0, "content": 0.5},
+            )[0]
+            queries.append(q)
+            if fuzzy_search:
+                # An exact match should outweigh a fuzzy one
+                fuzzy_q = index.parse_query_lenient(
+                    # fuzzy field: prefix (prefix must match) bool, distance int, transpose_cost_one (2 letters inverted cost 1 instead of 2): bool
+                    q_str,
+                    [
+                        "content",
+                        "bigram_content",
+                        "title",
+                        "correspondent",
+                        "tag",
+                        "type",
+                        "notes",
+                        "custom_fields",
+                        "added",
+                        "created",
+                        "modified",
+                    ],
+                    field_boosts={"title": 3.0, "content": 0.5},
+                    fuzzy_fields={
+                        "content": (True, 1, True),
+                        "title": (True, 1, True),
+                        "correspondent": (True, 1, True),
+                        "tag": (True, 1, True),
+                        "type": (True, 1, True),
+                        "notes": (True, 1, True),
+                        "custom_fields": (True, 1, True),
+                    },
+                )[0]
+                queries.append(tantivy.Query.boost_query(fuzzy_q, 0.1))
+            q = tantivy.Query.boolean_query(
+                [(tantivy.Occur.Should, q) for q in queries],
             )
+            words = autocomplete(
+                index,
+                q_str,
+                limit=1,
+                user=self.user,
+                fuzzy_search=True,
+            )
+            suggested_correction = words[0] if words and words[0] != q_str else None
 
         return q, None, suggested_correction
 
@@ -484,75 +1035,170 @@ class DelayedFullTextQuery(DelayedQuery):
 class DelayedMoreLikeThisQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         more_like_doc_id = int(self.query_params["more_like_id"])
-        content = Document.objects.get(id=more_like_doc_id).content
 
-        docnum = self.searcher.document_number(id=more_like_doc_id)
-        kts = self.searcher.key_terms_from_text(
-            "content",
-            content,
-            numterms=20,
-            model=classify.Bo1Model,
-            normalize=False,
+        # Fetch the current doc's address
+        current_doc_q = tantivy.Query.term_query(get_schema(), "id", more_like_doc_id)
+
+        doc_address: tantivy.DocAddress = self.searcher.search(
+            current_doc_q,
+            limit=1,
+        ).hits[0][1]
+
+        # Exclude the current doc for "more like this" search results
+        more_like_this_q = tantivy.Query.more_like_this_query(doc_address)
+        q = tantivy.Query.boolean_query(
+            [
+                (tantivy.Occur.Must, more_like_this_q),
+                (tantivy.Occur.MustNot, current_doc_q),
+            ],
         )
-        q = query.Or(
-            [query.Term("content", word, boost=weight) for word, weight in kts],
-        )
-        mask: set = {docnum}
+
+        mask = None  # TODO?
 
         return q, mask, None
 
 
+def _normalize(text: str) -> str:
+    # Decompose characters (NFKD) and remove diacritics
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
+    ).lower()
+
+
+def prefix_view(sorted_words: list[str], prefix: str):
+    """Return an iterator over words starting with prefix from a given list of sorted words."""
+
+    prefix = _normalize(prefix)
+    start_idx = bisect.bisect_left(sorted_words, prefix)
+
+    # iterate forward lazily, stop when prefix no longer matches
+    def generator():
+        for i in range(start_idx, len(sorted_words)):
+            word = sorted_words[i]
+            if not _normalize(word).startswith(prefix):
+                break
+            yield word
+
+    return generator()
+
+
 def autocomplete(
-    ix: FileIndex,
+    index,
     term: str,
     limit: int = 10,
     user: User | None = None,
-) -> list:
+    *,
+    fuzzy_search=False,
+) -> list[str]:
     """
-    Mimics whoosh.reading.IndexReader.most_distinctive_terms with permissions
-    and without scoring
+    Returns a list of autocomplete suggestions for the given term.
+    Caveat: documents are searched by Tantivy TF-IDF score,
+    but for each document found, all prefixes in this document are added to the list.
+    So only the first prefix is guaranteed to have the highest score.
     """
-    terms = []
+    with open_index() as index:
+        result: list[str] = list()
+        searcher = index.searcher()
+        schema = index.schema
+        perm_q = get_permissions_query(user, schema)
+        normalized_term = _normalize(term)
 
-    with ix.searcher(weighting=TF_IDF()) as s:
-        qp = QueryParser("content", schema=ix.schema)
-        # Don't let searches with a query that happen to match a field override the
-        # content field query instead and return bogus, not text data
-        qp.remove_plugin_class(FieldsPlugin)
-        q = qp.parse(f"{term.lower()}*")
-        user_criterias: list = get_permissions_criterias(user)
-
-        results = s.search(
-            q,
-            terms=True,
-            filter=query.Or(user_criterias) if user_criterias is not None else None,
+        # Find the exact match first
+        exact_subquery = tantivy.Query.term_query(
+            schema,
+            "autocomplete_word",
+            normalized_term,
+        )
+        exact_q = tantivy.Query.boolean_query(
+            [
+                (tantivy.Occur.Must, exact_subquery),
+                (tantivy.Occur.Must, perm_q),
+            ],
         )
 
-        termCounts = Counter()
-        if results.has_matched_terms():
-            for hit in results:
-                for _, match in hit.matched_terms():
-                    termCounts[match] += 1
-            terms = [t for t, _ in termCounts.most_common(limit)]
+        hits = searcher.search(exact_q, limit=1).hits
+        if hits:
+            result.append(term)
 
-        term_encoded: bytes = term.encode("UTF-8")
-        if term_encoded in terms:
-            terms.insert(0, terms.pop(terms.index(term_encoded)))
-
-    return terms
-
-
-def get_permissions_criterias(user: User | None = None) -> list:
-    user_criterias = [query.Term("has_owner", text=False)]
-    if user is not None:
-        if user.is_superuser:  # superusers see all docs
-            user_criterias = []
-        else:
-            user_criterias.append(query.Term("owner_id", user.id))
-            user_criterias.append(
-                query.Term("viewer_id", str(user.id)),
+        # Find prefixed terms until limit is reached
+        try:
+            if fuzzy_search:
+                prefix_subquery = tantivy.Query.fuzzy_term_query(
+                    schema,
+                    "autocomplete_word",
+                    normalized_term,
+                    1,
+                    transposition_cost_one=True,
+                    prefix=True,
+                )
+            else:
+                prefix_subquery = tantivy.Query.regex_query(
+                    schema,
+                    "autocomplete_word",
+                    f"{normalized_term}.*",
+                )
+        except ValueError as e:
+            # Autocomplete doesn't support special terms, e.g. parentheses, +, - etc.
+            logger.debug(f"{e}")
+            return []
+        seen = set()
+        remaining_limit = limit - len(result)
+        while len(result) < limit:
+            seen_q = []
+            for word in seen:
+                seen_q.append(
+                    (
+                        tantivy.Occur.MustNot,
+                        tantivy.Query.term_query(schema, "autocomplete_word", word),
+                    ),
+                )
+            prefix_q = tantivy.Query.boolean_query(
+                [
+                    (tantivy.Occur.MustNot, exact_subquery),
+                    (tantivy.Occur.Must, prefix_subquery),
+                    (tantivy.Occur.Must, perm_q),
+                    *seen_q,
+                ],
             )
-    return user_criterias
+
+            hits = searcher.search(prefix_q, limit=remaining_limit * 5).hits
+            if not hits:
+                return result
+            found_new_word = False
+            for _, addr in hits:
+                doc = searcher.doc(addr)
+                all_words = doc["autocomplete_word"]
+                for word in prefix_view(all_words, normalized_term):
+                    if word in seen:
+                        continue
+                    seen.add(word)
+                    found_new_word = True
+                    result.append(word)
+                    if len(result) >= limit:
+                        return result
+            if not found_new_word:
+                return result
+        return result
+
+
+def get_permissions_query(user: User | None, schema) -> tantivy.Query:
+    # No filter if super user
+    if user and user.is_superuser:
+        return tantivy.Query.all_query()
+
+    # Always return documents with no owner
+    queries = [tantivy.Query.term_query(schema, "has_owner", "false")]
+
+    if user:
+        user_id = str(user.id)
+        queries.extend(
+            [
+                tantivy.Query.term_query(schema, "owner_id", int(user_id)),
+                tantivy.Query.term_query(schema, "viewer_id", int(user_id)),
+            ],
+        )
+
+    return tantivy.Query.boolean_query([(tantivy.Occur.Should, q) for q in queries])
 
 
 def rewrite_natural_date_keywords(query_string: str) -> str:

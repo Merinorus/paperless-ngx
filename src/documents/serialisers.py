@@ -1268,9 +1268,11 @@ class DocumentSerializer(
 
 class SearchResultListSerializer(serializers.ListSerializer):
     def to_representation(self, hits):
+        # print(f"hits: {hits}")
         document_ids = [hit["id"] for hit in hits]
         # Fetch all Document objects in the list in one SQL query.
         documents = self.child.fetch_documents(document_ids)
+        # print(documents)
         self.child.context["documents"] = documents
         # Also check if they are shared with other users / groups.
         self.child.context["shared_object_pks"] = self.child.get_shared_object_pks(
@@ -1312,12 +1314,16 @@ class SearchResultSerializer(DocumentSerializer):
             [str(c.note) for c in document.notes.all()],
         )
         r = super().to_representation(document)
+
+        highlights = hit.highlights("content")
+        note_highlights = hit.highlights("notes")
+        score = (
+            hit.score if highlights else None
+        )  # Hide score in front-end if no text highlight
         r["__search_hit__"] = {
-            "score": hit.score,
-            "highlights": hit.highlights("content", text=document.content),
-            "note_highlights": (
-                hit.highlights("notes", text=notes) if document else None
-            ),
+            "score": score,
+            "highlights": highlights,
+            "note_highlights": note_highlights,
             "rank": hit.rank,
         }
 
