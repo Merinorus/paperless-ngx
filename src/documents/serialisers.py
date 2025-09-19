@@ -1215,9 +1215,11 @@ class DocumentSerializer(
 
 class SearchResultListSerializer(serializers.ListSerializer):
     def to_representation(self, hits):
+        print(f"hits: {hits}")
         document_ids = [hit["id"] for hit in hits]
         # Fetch all Document objects in the list in one SQL query.
         documents = self.child.fetch_documents(document_ids)
+        print(documents)
         self.child.context["documents"] = documents
         # Also check if they are shared with other users / groups.
         self.child.context["shared_object_pks"] = self.child.get_shared_object_pks(
