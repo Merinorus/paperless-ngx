@@ -14,6 +14,7 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.db import models
 from django.db import transaction
+from django.db.models import prefetch_related_objects
 from django.db.models.signals import post_save
 from django.utils import timezone
 from filelock import FileLock
@@ -67,14 +68,63 @@ def index_optimize():
     writer.commit(optimize=True)
 
 
-def index_reindex(*, progress_bar_disable=False):
-    documents = Document.objects.all()
+def _bulk_get_viewer_ids(doc_pks):
+    """Fetch all view_document permissions for a batch of documents in one query."""
+    from collections import defaultdict
 
-    ix = index.open_index(recreate=True)
+    from django.contrib.auth.models import Permission
+    from guardian.models import UserObjectPermission
 
-    with AsyncWriter(ix) as writer:
-        for document in tqdm.tqdm(documents, disable=progress_bar_disable):
-            index.update_document(writer, document)
+    ct = ContentType.objects.get_for_model(Document)
+    perm = Permission.objects.get(content_type=ct, codename="view_document")
+
+    qs = UserObjectPermission.objects.filter(
+        content_type=ct,
+        permission=perm,
+        object_pk__in=[str(pk) for pk in doc_pks],
+    ).values_list("object_pk", "user_id")
+
+    viewer_map = defaultdict(list)
+    for object_pk, user_id in qs:
+        viewer_map[int(object_pk)].append(user_id)
+    return viewer_map
+
+
+def index_reindex(*, progress_bar_disable=False) -> None:
+    total = Document.objects.count()
+    chunk_size = 1000  # Load docs from DB in RAM by chunks
+
+    base_qs = Document.objects.select_related(
+        "correspondent",
+        "document_type",
+        "storage_path",
+        "owner",
+    ).order_by("pk")
+
+    with index.open_index_writer(recreate=True) as writer:
+        with tqdm.tqdm(total=total, disable=progress_bar_disable) as progress_bar:
+            last_pk = 0
+            while True:
+                chunk = list(base_qs.filter(pk__gt=last_pk)[:chunk_size])
+                if not chunk:
+                    break
+
+                prefetch_related_objects(chunk, "tags", "notes", "custom_fields__field")
+
+                # Bulk-fetch permissions: 1 query per chunk instead of 1 per doc
+                chunk_pks = [doc.pk for doc in chunk]
+                viewer_map = _bulk_get_viewer_ids(chunk_pks)
+
+                for document in chunk:
+                    index.update_document(
+                        writer,
+                        document,
+                        viewer_ids=viewer_map.get(document.pk, []),
+                        skip_delete=True,
+                    )
+                    progress_bar.update(1)
+
+                last_pk = chunk[-1].pk
 
 
 @shared_task

@@ -1382,6 +1382,7 @@ class UnifiedSearchViewSet(DocumentViewSet):
                 self.request.query_params,
                 self.paginator.get_page_size(self.request),
                 filter_queryset=filtered_queryset,
+                user=self.request.user,
             )
         else:
             return filtered_queryset
@@ -1394,22 +1395,27 @@ class UnifiedSearchViewSet(DocumentViewSet):
                 with index.open_index_searcher() as s:
                     self.searcher = s
                     queryset = self.filter_queryset(self.get_queryset())
+                    # TODO: This fails
+                    # print(1)
+                    # print(queryset)
                     page = self.paginate_queryset(queryset)
-
+                    # print(2)
                     serializer = self.get_serializer(page, many=True)
+                    # print(3)
                     response = self.get_paginated_response(serializer.data)
-
+                    # print(4)
                     response.data["corrected_query"] = (
                         queryset.suggested_correction
                         if hasattr(queryset, "suggested_correction")
                         else None
                     )
-
+                    # print(5)
                     return response
             except NotFound:
                 raise
             except Exception as e:
                 logger.warning(f"An error occurred listing search results: {e!s}")
+                raise e
                 return HttpResponseBadRequest(
                     "Error listing search results, check logs for more detail.",
                 )

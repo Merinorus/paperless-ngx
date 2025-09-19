@@ -70,18 +70,9 @@ class StandardPagination(PageNumberPagination):
     def get_all_result_ids(self):
         query = self.page.paginator.object_list
         if isinstance(query, DelayedQuery):
-            try:
-                ids = [
-                    query.searcher.ixreader.stored_fields(
-                        doc_num,
-                    )["id"]
-                    for doc_num in query.saved_results.get(0).results.docs()
-                ]
-            except Exception:
-                pass
+            return query._get_all_ids()
         else:
-            ids = self.page.paginator.object_list.values_list("pk", flat=True)
-        return ids
+            return list(query.values_list("pk", flat=True))
 
     def get_paginated_response_schema(self, schema):
         response_schema = super().get_paginated_response_schema(schema)

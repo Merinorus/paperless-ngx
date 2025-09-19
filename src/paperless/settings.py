@@ -283,7 +283,7 @@ EMPTY_TRASH_DIR = (
 # Lock file for synchronizing changes to the MEDIA directory across multiple
 # threads.
 MEDIA_LOCK = MEDIA_ROOT / "media.lock"
-INDEX_DIR = DATA_DIR / "index"
+INDEX_DIR = __get_path("PAPERLESS_INDEX_DIR", DATA_DIR / "index")
 MODEL_FILE = __get_path(
     "PAPERLESS_MODEL_FILE",
     DATA_DIR / "classification_model.pickle",
@@ -762,6 +762,9 @@ if os.getenv("PAPERLESS_DBENGINE") == "mariadb":
     SILENCED_SYSTEM_CHECKS = ["mysql.W003"]
 
 DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
+
+# Set to 0 to disable fuzzy search
+ADVANCED_FUZZY_SEARCH_TRESHOLD = __get_int("PAPERLESS_ADVANCED_FUZZY_SEARCH_TRESHOLD", 0)
 
 ###############################################################################
 # Internationalization                                                        #
