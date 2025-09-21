@@ -172,9 +172,9 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
             path=doc.storage_path.name if doc.storage_path else "",
             path_id=doc.storage_path.id if doc.storage_path else 0,
             has_path=doc.storage_path is not None,
-            notes=notes,
+            notes=notes or "",
             num_notes=len(notes),
-            custom_fields=custom_fields,
+            custom_fields=custom_fields or "",
             custom_field_count=len(doc.custom_fields.all()),
             has_custom_fields=len(custom_fields) > 0,
             custom_fields_id=custom_fields_ids if custom_fields_ids else "",
@@ -182,8 +182,8 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
             owner_id=doc.owner.id if doc.owner else 0,
             has_owner=doc.owner is not None,
             viewer_id=viewer_ids if viewer_ids else "",
-            checksum=doc.checksum,
-            page_count=doc.page_count,
+            checksum=doc.checksum or "",
+            page_count=doc.page_count or 0,
             original_filename=doc.original_filename,
             is_shared=len(viewer_ids) > 0,
         ),
@@ -202,6 +202,15 @@ def remove_document_by_id(writer: tantivy.IndexWriter, doc_id) -> None:
 def add_or_update_document(document: Document) -> None:
     with open_index_writer() as writer:
         update_document(writer, document)
+
+
+def add_or_update_documents(documents: list[Document], batchsize=100) -> None:
+    for i in range(0, len(documents), batchsize):
+        batch = documents[i : i + batchsize]
+        # do stuff with batch
+        with open_index_writer() as writer:
+            for document in batch:
+                update_document(writer, document)
 
 
 def remove_document_from_index(document: Document) -> None:

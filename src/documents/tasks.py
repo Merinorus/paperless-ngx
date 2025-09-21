@@ -69,12 +69,11 @@ def index_optimize():
 
 def index_reindex(*, progress_bar_disable=False):
     documents = Document.objects.all()
-
-    ix = index.open_index(recreate=True)
-
-    with AsyncWriter(ix) as writer:
-        for document in tqdm.tqdm(documents, disable=progress_bar_disable):
-            index.update_document(writer, document)
+    total = documents.count()
+    batchsize = 200
+    for i in tqdm.tqdm(range(0, total, batchsize), disable=progress_bar_disable):
+        batch = documents[i : i + batchsize]
+        index.add_or_update_documents(batch, batchsize=batchsize)
 
 
 @shared_task
