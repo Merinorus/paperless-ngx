@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import time
@@ -408,18 +409,22 @@ class DelayedQuery:
             print(f"DB query took {time.time() - t1:.3f} seconds")
             print(3.1)
             print(search_result)
+            hit_scores = defaultdict(float)  # doc_id -> max score
             for score, doc_addr in search_result:
                 doc = self.searcher.doc(doc_addr)
+                doc_id = doc["id"][0]
                 # print(score)
                 # print(doc_addr)
                 # print(doc)
                 # print(doc["id"])
                 print(3.2)
-                if doc["id"][0] in allowed_ids:
+                if doc_id in allowed_ids:
                     print(3.3)
                     # results.append({"id": doc["id"][0], "score": score})
-                    results.append(Hit(doc["id"][0], score))
+                    hit_scores[doc_id] = max(hit_scores[doc_id], score)
+                    # results.append(Hit(doc["id"][0], score))
                     print(3.4)
+            results = [Hit(doc_id, score) for doc_id, score in hit_scores.items()]
             # results = [r for r in search_result if r.get("id") in allowed_ids]
             for idx, hit in enumerate(results, start=1):
                 hit.rank = idx
