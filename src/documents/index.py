@@ -121,6 +121,7 @@ def open_index_writer(**kwargs):
 @contextmanager
 def open_index_searcher():
     with open_index() as index:
+        index.config_reader(reload_policy="commit")
         yield index.searcher()
 
 
@@ -517,7 +518,10 @@ class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         q_str = self.query_params["query"]
         q_str = rewrite_natural_date_keywords(q_str)
-
+        if len(q_str) <= 3 or "NOT " in q_str:
+            fuzzy_search = False
+        else:
+            fuzzy_search = True
         # qp = MultifieldParser(
         #     [
         #         "content",
@@ -540,7 +544,10 @@ class DelayedFullTextQuery(DelayedQuery):
 
         # TODO: date parsing plugin like whoosh
         with open_index() as index:
+            # q = tantivy.Query.regex_query(schema=get_schema(), field_name="content", regex_pattern=f"{term}.*")
+            # q = tantivy.Query.fuzzy_term_query
             q = index.parse_query(
+                # fuzzy field: prefix (prefix must match) bool, distance int, transpose_cost_one (2 letters inverted cost 1 instead of 2): bool
                 q_str,
                 [
                     "content",
@@ -551,7 +558,41 @@ class DelayedFullTextQuery(DelayedQuery):
                     "notes",
                     "custom_fields",
                 ],
+                field_boosts={"title": 5.0, "content": 0.5},
+                # "tag": 2.0, "correspondent": 2.0, "type": 2.0, "custom_fields": 2.0
             )
+            if fuzzy_search:
+                # An exact match should outweigh a fuzzy one
+                fuzzy_q = index.parse_query(
+                    # fuzzy field: prefix (prefix must match) bool, distance int, transpose_cost_one (2 letters inverted cost 1 instead of 2): bool
+                    q_str,
+                    [
+                        "content",
+                        "title",
+                        "correspondent",
+                        "tag",
+                        "type",
+                        "notes",
+                        "custom_fields",
+                    ],
+                    field_boosts={"title": 5.0, "content": 0.5},
+                    fuzzy_fields={
+                        "content": (True, 1, True),
+                        "title": (True, 1, True),
+                        "correspondent": (True, 1, True),
+                        "tag": (True, 1, True),
+                        "type": (True, 1, True),
+                        "notes": (True, 1, True),
+                        "custom_fields": (True, 1, True),
+                    },
+                )
+                # q = tantivy.Query.boolean_query(should=[q, fuzzy_q])
+                q = tantivy.Query.boolean_query(
+                    [
+                        (tantivy.Occur.Should, q),
+                        (tantivy.Occur.Should, fuzzy_q),
+                    ],
+                )
         suggested_correction = None
         # TODO: corrections not available in tantivy?
         # try:
@@ -601,6 +642,38 @@ def autocomplete(
     Mimics whoosh.reading.IndexReader.most_distinctive_terms with permissions
     and without scoring
     """
+    with open_index() as index:
+        q = tantivy.Query.regex_query(
+            schema=get_schema(),
+            field_name="content",
+            regex_pattern=f"{term}.*",
+        )
+        search_result = index.searcher().search(q, limit=limit).hits
+        print(search_result)
+        # q = index.parse_query(
+        #     term,
+        #     [
+        #         "content",
+        #         "title",
+        #         "correspondent",
+        #         "tag",
+        #         "type",
+        #         "notes",
+        #         "custom_fields",
+        #     ],
+
+        # )
+
+        # mlt_query = tantivy.Query.more_like_this_query()
+        # mlt_query.add_field("content")
+        # mlt_query.like_text(user_input)
+
+        # results = searcher.search(mlt_query, limit=10).hits
+        # print(hits)
+
+        # prefix_query = tantivy.Query.more_like_this_query()
+        # prefix_query = tantivy.PrefixQuery(field, user_input.lower())
+        # results = searcher.search(prefix_query, limit=10).hits
     terms = []
     # TODO : support autocomplete in tantivy
     return terms
