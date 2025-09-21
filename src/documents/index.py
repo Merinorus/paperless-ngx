@@ -46,6 +46,7 @@ def get_schema():
     # TODO are all the has_ really needed?
     sb.add_unsigned_field("id", stored=True)
     sb.add_text_field("title", stored=True)
+    sb.add_text_field("autocomplete_word", stored=True)
     sb.add_text_field("content", stored=False)  # pas nécessairement stored
     sb.add_unsigned_field("asn", stored=True)
     sb.add_text_field("correspondent", stored=True)
@@ -125,6 +126,13 @@ def open_index_searcher():
         yield index.searcher()
 
 
+def tokenize_for_autocomplete(text: str) -> list[str]:
+    # Lowercase, split on non-word characters
+    # Matches Tantivy’s default behavior for text fields
+    words = re.findall(r"\b\w+\b", text.lower())
+    return words
+
+
 def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
     tags = ",".join([t.name for t in doc.tags.all()])
     tags_ids = ",".join([str(t.id) for t in doc.tags.all()])
@@ -190,6 +198,18 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
             is_shared=len(viewer_ids) > 0,
         ),
     )
+    added_words = set()
+    for word in tokenize_for_autocomplete(doc.content):
+        if word not in added_words:
+            added_words.add(word)
+            writer.add_document(
+                tantivy.Document(
+                    id=doc.pk,
+                    autocomplete_word=word,
+                    owner_id=doc.owner.id if doc.owner else 0,
+                    viewer_id=viewer_ids if viewer_ids else "",
+                ),
+            )
     logger.debug(f"Index updated for document {doc.pk}.")
 
 
@@ -413,6 +433,7 @@ class DelayedQuery:
             hit_scores = defaultdict(float)  # doc_id -> max score
             for score, doc_addr in search_result:
                 doc = self.searcher.doc(doc_addr)
+                # print(q.explain(self.searcher, doc_addr).to_json())
                 doc_id = doc["id"][0]
                 # print(score)
                 # print(doc_addr)
@@ -632,6 +653,30 @@ class DelayedMoreLikeThisQuery(DelayedQuery):
         return q, mask, None
 
 
+# def get_permissions_queries(user: User | None = None) -> list:
+#     queries = []
+
+#     if user is None:
+#         # If no user, include only docs with has_owner = False
+#         field = schema.get_field("has_owner")
+#         queries.append(TermQuery(Term(field, "false")))
+#     elif getattr(user, "is_superuser", False):
+#         # Superuser sees all docs → no filter
+#         return []
+#     else:
+#         # Regular user: can see docs they own or that are shared with them
+#         owner_field = schema.get_field("owner_id")
+#         viewer_field = schema.get_field("viewer_id")
+
+#         owner_query = TermQuery(Term(owner_field, str(user.id)))
+#         viewer_query = TermQuery(Term(viewer_field, str(user.id)))
+
+#         # Combine with OR
+#         queries.append(BooleanQuery.or_([owner_query, viewer_query]))
+
+#     return queries
+
+
 def autocomplete(
     ix: FileIndex,
     term: str,
@@ -642,14 +687,46 @@ def autocomplete(
     Mimics whoosh.reading.IndexReader.most_distinctive_terms with permissions
     and without scoring
     """
+    terms = []
     with open_index() as index:
-        q = tantivy.Query.regex_query(
-            schema=get_schema(),
-            field_name="content",
+        searcher = index.searcher()
+        # TODO: filter by user permissions
+
+        exact_q = tantivy.Query.term_query(
+            schema=index.schema,
+            field_name="autocomplete_word",
+            field_value=term,
+        )
+        prefix_q = tantivy.Query.regex_query(
+            schema=index.schema,
+            field_name="autocomplete_word",
             regex_pattern=f"{term}.*",
         )
-        search_result = index.searcher().search(q, limit=limit).hits
-        print(search_result)
+        q = tantivy.Query.boolean_query(
+            [
+                (tantivy.Occur.Should, exact_q),
+                (tantivy.Occur.Should, prefix_q),
+            ],
+        )
+        # searcher = index.searcher()
+        search_result = searcher.search(q, limit=limit).hits
+        exact_matches = []
+        prefix_matches = []
+        seen = set()
+        # print(search_result)
+        for _, doc_addr in search_result:
+            doc = searcher.doc(doc_addr)
+            # print(q.explain(self.searcher, doc_addr).to_json())
+            word = doc["autocomplete_word"][0]
+            if word in seen:
+                continue
+            seen.add(word)
+            if word == term.lower():
+                exact_matches.append(word)
+            else:
+                prefix_matches.append(word)
+        terms = exact_matches + prefix_matches
+        # print(q.explain(searcher, doc_addr).to_json())
         # q = index.parse_query(
         #     term,
         #     [
@@ -674,9 +751,9 @@ def autocomplete(
         # prefix_query = tantivy.Query.more_like_this_query()
         # prefix_query = tantivy.PrefixQuery(field, user_input.lower())
         # results = searcher.search(prefix_query, limit=10).hits
-    terms = []
+    # terms = []
     # TODO : support autocomplete in tantivy
-    return terms
+    return terms[:limit]
 
 
 def get_permissions_criterias(user: User | None = None) -> list:
