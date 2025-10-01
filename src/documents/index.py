@@ -75,7 +75,7 @@ def get_schema():
     sb.add_boolean_field("has_custom_fields", stored=True)
     sb.add_text_field("owner", stored=True)
     sb.add_integer_field("owner_id", stored=True, indexed=True)
-    # sb.add_boolean_field("has_owner", stored=True, indexed=True)
+    sb.add_boolean_field("has_owner", indexed=True)
     sb.add_integer_field("viewer_id", stored=True, indexed=True)
     sb.add_text_field("checksum", stored=True)
     sb.add_integer_field("page_count", stored=True)
@@ -191,6 +191,7 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
         has_custom_fields=len(custom_fields) > 0,
         owner=doc.owner.username if doc.owner else "",
         owner_id=int(doc.owner.id if doc.owner and doc.owner.id else 0),
+        has_owner=doc.owner and doc.owner.id is not None,
         checksum=doc.checksum or "",
         page_count=doc.page_count or 0,
         original_filename=doc.original_filename,
@@ -729,209 +730,80 @@ class DelayedMoreLikeThisQuery(DelayedQuery):
         return q, mask, None
 
 
-# def get_permissions_queries(user: User | None = None) -> list:
-#     queries = []
-
-#     if user is None:
-#         # If no user, include only docs with has_owner = False
-#         field = schema.get_field("has_owner")
-#         queries.append(TermQuery(Term(field, "false")))
-#     elif getattr(user, "is_superuser", False):
-#         # Superuser sees all docs → no filter
-#         return []
-#     else:
-#         # Regular user: can see docs they own or that are shared with them
-#         owner_field = schema.get_field("owner_id")
-#         viewer_field = schema.get_field("viewer_id")
-
-#         owner_query = TermQuery(Term(owner_field, str(user.id)))
-#         viewer_query = TermQuery(Term(viewer_field, str(user.id)))
-
-#         # Combine with OR
-#         queries.append(BooleanQuery.or_([owner_query, viewer_query]))
-
-#     return queries
-
-
-# def autocomplete(
-#     ix: FileIndex,
-#     term: str,
-#     limit: int = 10,
-#     user: User | None = None,
-# ) -> list:
-#     """
-#     Mimics whoosh.reading.IndexReader.most_distinctive_terms with permissions
-#     and without scoring
-#     """
-#     terms = []
-#     with open_index() as index:
-#         searcher = index.searcher()
-#         # TODO: filter by user permissions
-#         perm_q = get_permissions_criterias(user)
-
-#         exact_q = tantivy.Query.term_query(
-#             schema=index.schema,
-#             field_name="autocomplete_word",
-#             field_value=term,
-#         )
-#         prefix_q = tantivy.Query.regex_query(
-#             schema=index.schema,
-#             field_name="autocomplete_word",
-#             regex_pattern=f"{term}.*",
-#         )
-#         q = tantivy.Query.boolean_query(
-#             [
-#                 (tantivy.Occur.Should, exact_q),
-#                 (tantivy.Occur.Should, prefix_q),
-#             ],
-#         )
-#         # searcher = index.searcher()
-#         search_result = searcher.search(q, limit=limit).hits
-#         exact_matches = []
-#         prefix_matches = []
-#         seen = set()
-#         # print(search_result)
-#         for _, doc_addr in search_result:
-#             doc = searcher.doc(doc_addr)
-#             # print(q.explain(self.searcher, doc_addr).to_json())
-#             word = doc["autocomplete_word"][0]
-#             if word in seen:
-#                 continue
-#             seen.add(word)
-#             if word == term.lower():
-#                 exact_matches.append(word)
-#             else:
-#                 prefix_matches.append(word)
-#         terms = exact_matches + prefix_matches
-#         # print(q.explain(searcher, doc_addr).to_json())
-#         # q = index.parse_query(
-#         #     term,
-#         #     [
-#         #         "content",
-#         #         "title",
-#         #         "correspondent",
-#         #         "tag",
-#         #         "type",
-#         #         "notes",
-#         #         "custom_fields",
-#         #     ],
-
-#         # )
-
-#         # mlt_query = tantivy.Query.more_like_this_query()
-#         # mlt_query.add_field("content")
-#         # mlt_query.like_text(user_input)
-
-#         # results = searcher.search(mlt_query, limit=10).hits
-#         # print(hits)
-
-#         # prefix_query = tantivy.Query.more_like_this_query()
-#         # prefix_query = tantivy.PrefixQuery(field, user_input.lower())
-#         # results = searcher.search(prefix_query, limit=10).hits
-#     # terms = []
-#     # TODO : support autocomplete in tantivy
-#     return terms[:limit]
-
-
 def autocomplete(
     index,
     term: str,
     limit: int = 10,
     user: User | None = None,
 ) -> list[str]:
-    """
-    Retourne les termes d'autocomplétion visible par l'utilisateur.
-    """
     with open_index() as index:
+        result: list[str] = list()
         searcher = index.searcher()
         schema = index.schema
+        perm_q = get_permissions_query(user, schema)
 
-        # --- Queries principales : exact match + prefix ---
-        exact_q = tantivy.Query.term_query(schema, "autocomplete_word", term)
-        prefix_q = tantivy.Query.regex_query(schema, "autocomplete_word", f"{term}.*")
-
-        autocomplete_q = tantivy.Query.boolean_query(
+        # Find the exact match first
+        exact_subquery = tantivy.Query.term_query(schema, "autocomplete_word", term)
+        exact_q = tantivy.Query.boolean_query(
             [
-                (tantivy.Occur.Should, exact_q),
-                (tantivy.Occur.Should, prefix_q),
+                (tantivy.Occur.Must, exact_subquery),
+                (tantivy.Occur.Must, perm_q),
             ],
         )
 
-        # --- Permissions ---
-        perm_q = get_permissions_query(user, schema)
-        if perm_q is not None:
-            # Combine autocomplétion + permissions
-            final_q = tantivy.Query.boolean_query(
+        hits = searcher.search(exact_q, limit=1).hits
+        if hits:
+            result.append(term)
+
+        # Find prefixed terms until limit is reached
+        prefix_subquery = tantivy.Query.regex_query(
+            schema,
+            "autocomplete_word",
+            f"{term}.*",
+        )
+        seen = set()
+        remaining_limit = limit - len(result)
+        while len(result) < limit:
+            seen_q = []
+            for word in seen:
+                seen_q.append(
+                    (
+                        tantivy.Occur.MustNot,
+                        tantivy.Query.term_query(schema, "autocomplete_word", word),
+                    ),
+                )
+            prefix_q = tantivy.Query.boolean_query(
                 [
-                    (tantivy.Occur.Must, autocomplete_q),
+                    (tantivy.Occur.MustNot, exact_subquery),
+                    (tantivy.Occur.Must, prefix_subquery),
                     (tantivy.Occur.Must, perm_q),
+                    *seen_q,
                 ],
             )
-        else:
-            final_q = autocomplete_q
 
-        # --- Recherche ---
-        hits = searcher.search(final_q, limit=limit).hits
+            hits = searcher.search(prefix_q, limit=remaining_limit * 5).hits
+            if not hits:
+                return result
 
-        # --- Extraction & dédoublonnage ---
-        seen, exact, prefix = set(), [], []
-        for _, addr in hits:
-            doc = searcher.doc(addr)
-            word = doc["autocomplete_word"][0].lower()
-            if word in seen:
-                continue
-            seen.add(word)
-            (exact if word == term.lower() else prefix).append(word)
-
-        return (exact + prefix)[:limit]
+            for _, addr in hits:
+                doc = searcher.doc(addr)
+                word = doc["autocomplete_word"][0].lower()
+                if word in seen:
+                    continue
+                seen.add(word)
+                result.append(word)
+                if len(result) >= limit:
+                    break
+        return result
 
 
-# def get_permissions_criterias(user: User | None = None) -> list:
-
-#                 #     q = tantivy.Query.boolean_query(
-#                 #     [
-#                 #         (tantivy.Occur.Should, q),
-#                 #         (tantivy.Occur.Should, fuzzy_q),
-#                 #     ],
-#                 # )
-#                     # query = TermQuery(Term(field, "true"))
-#     user_criterias = [(tantivy.Occur.should, tantivy.Query.term_query(
-#         schema=get_schema(),
-#         field_name="has_owner",
-#         field_value="false",
-#     ))]
-#     # user_criterias = [query.Term("has_owner", text=False)]
-#     if user is not None:
-#         if user.is_superuser:  # superusers see all docs
-#             user_criterias = []
-#         else:
-#             user_criterias.append((tantivy.Occur.should, tantivy.Query.term_query(
-#                 schema=get_schema(),
-#                 field_name="owner_id",
-#                 field_value=str(user.id))))
-#             # user_criterias.append(query.Term("owner_id", user.id))
-#             user_criterias.append((tantivy.Occur.should, tantivy.Query.term_query(
-#                 schema=get_schema(),
-#                 field_name="viewer_id",
-#                 field_value=str(user.id),
-#             )))
-#             # user_criterias.append(
-#             #     query.Term("viewer_id", str(user.id)),
-#             # )
-#     return user_criterias
-
-
-def get_permissions_query(user: User | None, schema) -> tantivy.Query | None:
-    """
-    Renvoie une Query tantivy filtrant les documents selon les permissions.
-    """
-    # No filter is super user
+def get_permissions_query(user: User | None, schema) -> tantivy.Query:
+    # No filter if super user
     if user and user.is_superuser:
-        return None
+        return tantivy.Query.all_query()
 
     # Always return documents with no owner
-    # queries = [tantivy.Query.term_query(schema, "has_owner", "false")]
-    queries = []
+    queries = [tantivy.Query.term_query(schema, "has_owner", "false")]
 
     if user:
         user_id = str(user.id)
