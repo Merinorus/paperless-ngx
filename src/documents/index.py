@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from whoosh.searching import ResultsPage
 
 logger = logging.getLogger("paperless.index")
+index_dir = f"{settings.INDEX_DIR}_tantivy"
 
 
 @lru_cache(maxsize=1)
@@ -84,7 +85,7 @@ def get_schema():
     return sb.build()
 
 
-def recreate_index_dir(path=str(settings.INDEX_DIR)):
+def recreate_index_dir(path=index_dir):
     if Path(path).exists():
         rmtree(path)
     Path(path).mkdir(parents=True, exist_ok=True)
@@ -92,7 +93,7 @@ def recreate_index_dir(path=str(settings.INDEX_DIR)):
 
 @contextmanager
 def open_index(*, recreate=False, reload=True):
-    path = str(settings.INDEX_DIR)
+    path = index_dir
     if recreate or not Path(path).exists():
         recreate_index_dir(path)
     try:
