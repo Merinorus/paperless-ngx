@@ -84,7 +84,7 @@ def get_schema():
     return sb.build()
 
 
-def _recreate_index_dir(path):
+def recreate_index_dir(path=str(settings.INDEX_DIR)):
     if Path(path).exists():
         rmtree(path)
     Path(path).mkdir(parents=True, exist_ok=True)
@@ -94,13 +94,13 @@ def _recreate_index_dir(path):
 def open_index(*, recreate=False, reload=True):
     path = str(settings.INDEX_DIR)
     if recreate or not Path(path).exists():
-        _recreate_index_dir(path)
+        recreate_index_dir(path)
     try:
         index = tantivy.Index(schema=get_schema(), path=path)
     except ValueError as e:
         # Schema has changed
         logger.warning(f"Recreating index due to error: {e}")
-        _recreate_index_dir(path)
+        recreate_index_dir(path)
         index = tantivy.Index(schema=get_schema(), path=path)
     if reload:
         index.reload()  # Ensure we have the latest commit?
@@ -289,7 +289,7 @@ class Hit:
         raise KeyError(key)
 
     def highlights(self, *args, **kwargs):
-        text = kwargs.get("text", "")
+        # text = kwargs.get("text", "")
         # return None
         # return text
         if not self._highlights:
@@ -462,7 +462,7 @@ class DelayedQuery:
                 get_schema(),
                 "content",
             )
-            snippet_generator.set_max_num_chars(500)
+            snippet_generator.set_max_num_chars(550)
             results = list()
             hit_scores = defaultdict(float)  # doc_id -> max score
             for score, doc_addr in search_result:
