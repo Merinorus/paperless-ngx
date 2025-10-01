@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from collections import defaultdict
 from contextlib import contextmanager
@@ -109,7 +110,7 @@ def open_index(*, recreate=False, reload=True):
 @contextmanager
 def open_index_writer(**kwargs):
     with open_index(reload=False) as index:
-        writer = index.writer()
+        writer = index.writer(num_threads=os.cpu_count())
         try:
             yield writer
         except Exception as e:
@@ -231,13 +232,18 @@ def add_or_update_document(document: Document) -> None:
         update_document(writer, document)
 
 
-def add_or_update_documents(documents: list[Document], batchsize=100) -> None:
-    for i in range(0, len(documents), batchsize):
-        batch = documents[i : i + batchsize]
-        # do stuff with batch
+def add_or_update_documents(documents: list[Document], batchsize=0) -> None:
+    if batchsize <= 0:
         with open_index_writer() as writer:
             for document in batch:
                 update_document(writer, document)
+    else:
+        for i in range(0, len(documents), batchsize):
+            batch = documents[i : i + batchsize]
+            # do stuff with batch
+            with open_index_writer() as writer:
+                for document in batch:
+                    update_document(writer, document)
 
 
 def remove_document_from_index(document: Document) -> None:
