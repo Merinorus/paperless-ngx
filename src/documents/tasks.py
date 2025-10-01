@@ -70,7 +70,7 @@ def index_optimize():
 def index_reindex(*, progress_bar_disable=False):
     documents = Document.objects.all()
     total = documents.count()
-    batchsize = 200
+    batchsize = 1000
     for i in tqdm.tqdm(range(0, total, batchsize), disable=progress_bar_disable):
         batch = documents[i : i + batchsize]
         index.add_or_update_documents(batch, batchsize=batchsize)

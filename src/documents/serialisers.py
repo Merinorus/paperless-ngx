@@ -1261,12 +1261,27 @@ class SearchResultSerializer(DocumentSerializer):
             [str(c.note) for c in document.notes.all()],
         )
         r = super().to_representation(document)
+        # r["__search_hit__"] = {
+        #     "score": hit.score,
+        #     "highlights": hit.highlights("content", text=document.content),
+        #     # "note_highlights": (
+        #     #     hit.highlights("notes", text=notes) if document else None
+        #     # ),
+        #     "note_highlights": None,
+        #     "rank": hit.rank,
+        # }
+
+        highlights = hit.highlights("content", text=document.content)
+        score = (
+            hit.score if highlights else None
+        )  # Hide score in front-end if no text highlight
         r["__search_hit__"] = {
-            "score": hit.score,
-            "highlights": hit.highlights("content", text=document.content),
-            "note_highlights": (
-                hit.highlights("notes", text=notes) if document else None
-            ),
+            "score": score,
+            "highlights": highlights,
+            # "note_highlights": (
+            #     hit.highlights("notes", text=notes) if document else None
+            # ),
+            "note_highlights": None,
             "rank": hit.rank,
         }
 

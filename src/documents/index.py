@@ -9,6 +9,7 @@ from datetime import datetime
 from datetime import time
 from datetime import timedelta
 from datetime import timezone
+from functools import lru_cache
 from pathlib import Path
 from shutil import rmtree
 from typing import TYPE_CHECKING
@@ -22,10 +23,8 @@ from django.utils.timezone import get_current_timezone
 from django.utils.timezone import now
 from guardian.shortcuts import get_users_with_perms
 from whoosh import classify
-from whoosh import highlight
 from whoosh import query
 from whoosh.highlight import HtmlFormatter
-from whoosh.index import FileIndex
 from whoosh.qparser.dateparse import English
 from whoosh.util.times import timespan
 
@@ -41,41 +40,43 @@ if TYPE_CHECKING:
 logger = logging.getLogger("paperless.index")
 
 
+@lru_cache(maxsize=1)
 def get_schema():
     sb = tantivy.SchemaBuilder()
     # TODO are all the has_ really needed?
-    sb.add_unsigned_field("id", stored=True)
+    sb.add_integer_field("id", stored=True)
     sb.add_text_field("title", stored=True)
     sb.add_text_field("autocomplete_word", stored=True)
-    sb.add_text_field("content", stored=False)  # pas nécessairement stored
-    sb.add_unsigned_field("asn", stored=True)
+    sb.add_text_field("content", stored=True)  # pas nécessairement stored
+    sb.add_integer_field("asn", stored=True)
     sb.add_text_field("correspondent", stored=True)
-    sb.add_unsigned_field("correspondent_id", stored=True)
+    sb.add_integer_field("correspondent_id", stored=True)
     sb.add_boolean_field("has_correspondent", stored=True)
     sb.add_text_field("tag", stored=True)
-    sb.add_text_field("tag_id", stored=True)
+    sb.add_integer_field("tag_id", stored=True)
     sb.add_boolean_field("has_tag", stored=True)
     sb.add_text_field("type", stored=True)
-    sb.add_unsigned_field("type_id", stored=True)
+    sb.add_integer_field("type_id", stored=True)
     sb.add_boolean_field("has_type", stored=True)
     sb.add_date_field("created", stored=True)  # UNIX timestamp or ISO string
     sb.add_date_field("modified", stored=True)
     sb.add_date_field("added", stored=True)
     sb.add_text_field("path", stored=True)
-    sb.add_unsigned_field("path_id", stored=True)
+    sb.add_integer_field("path_id", stored=True)
     sb.add_boolean_field("has_path", stored=True)
     sb.add_text_field("notes", stored=True)
-    sb.add_unsigned_field("num_notes", stored=True)
+    sb.add_integer_field("num_notes", stored=True)
     sb.add_text_field("custom_fields", stored=True)
-    sb.add_unsigned_field("custom_field_count", stored=True)
-    sb.add_text_field("custom_fields_id", stored=True)
+    sb.add_integer_field("custom_field_count", stored=True)
+    # sb.add_text_field("custom_fields_id", stored=True)
+    sb.add_integer_field("custom_fields_id", stored=True)
     sb.add_boolean_field("has_custom_fields", stored=True)
     sb.add_text_field("owner", stored=True)
-    sb.add_unsigned_field("owner_id", stored=True)
-    sb.add_boolean_field("has_owner", stored=True)
-    sb.add_unsigned_field("viewer_id", stored=True)  # tokenization raw preferred
+    sb.add_integer_field("owner_id", stored=True, indexed=True)
+    # sb.add_boolean_field("has_owner", stored=True, indexed=True)
+    sb.add_integer_field("viewer_id", stored=True, indexed=True)
     sb.add_text_field("checksum", stored=True)
-    sb.add_unsigned_field("page_count", stored=True)
+    sb.add_integer_field("page_count", stored=True)
     sb.add_text_field("original_filename", stored=True)
     sb.add_boolean_field("is_shared", stored=True)  # or integer 0/1
 
@@ -135,14 +136,14 @@ def tokenize_for_autocomplete(text: str) -> list[str]:
 
 def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
     tags = ",".join([t.name for t in doc.tags.all()])
-    tags_ids = ",".join([str(t.id) for t in doc.tags.all()])
+    tags_ids = [t.id for t in doc.tags.all()]
     notes = ",".join([str(c.note) for c in Note.objects.filter(document=doc)])
     custom_fields = ",".join(
         [str(c) for c in CustomFieldInstance.objects.filter(document=doc)],
     )
-    custom_fields_ids = ",".join(
-        [str(f.field.id) for f in CustomFieldInstance.objects.filter(document=doc)],
-    )
+    custom_fields_ids = [
+        f.field.id for f in CustomFieldInstance.objects.filter(document=doc)
+    ]
     asn: int | None = doc.archive_serial_number
     if asn is not None and (
         asn < Document.ARCHIVE_SERIAL_NUMBER_MIN
@@ -159,57 +160,61 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
         doc,
         only_with_perms_in=["view_document"],
     )
-    viewer_ids: str = ",".join([str(u.id) for u in users_with_perms])
+    viewer_ids = [int(u.id) for u in users_with_perms]
     writer.delete_documents("id", doc.pk)
-    writer.add_document(
-        tantivy.Document(
-            id=doc.pk,
-            title=doc.title,
-            content=doc.content,
-            correspondent=doc.correspondent.name if doc.correspondent else "",
-            correspondent_id=doc.correspondent.id if doc.correspondent else 0,
-            has_correspondent=doc.correspondent is not None,
-            tag=tags if tags else "",
-            tag_id=tags_ids if tags_ids else "",
-            has_tag=len(tags) > 0,
-            type=doc.document_type.name if doc.document_type else "",
-            type_id=doc.document_type.id if doc.document_type else 0,
-            has_type=doc.document_type is not None,
-            created=datetime.combine(doc.created, time.min).isoformat(),
-            added=doc.added.isoformat(),
-            asn=asn or 0,
-            modified=doc.modified.isoformat(),
-            path=doc.storage_path.name if doc.storage_path else "",
-            path_id=doc.storage_path.id if doc.storage_path else 0,
-            has_path=doc.storage_path is not None,
-            notes=notes or "",
-            num_notes=len(notes),
-            custom_fields=custom_fields or "",
-            custom_field_count=len(doc.custom_fields.all()),
-            has_custom_fields=len(custom_fields) > 0,
-            custom_fields_id=custom_fields_ids if custom_fields_ids else "",
-            owner=doc.owner.username if doc.owner else "",
-            owner_id=doc.owner.id if doc.owner else 0,
-            has_owner=doc.owner is not None,
-            viewer_id=viewer_ids if viewer_ids else "",
-            checksum=doc.checksum or "",
-            page_count=doc.page_count or 0,
-            original_filename=doc.original_filename,
-            is_shared=len(viewer_ids) > 0,
-        ),
+    # print(f"owner id: {int(doc.owner.id if doc.owner and doc.owner.id else 0)} (type: {type(int(doc.owner.id if doc.owner and doc.owner.id else 0))})")
+    indexed_doc = tantivy.Document(
+        id=doc.pk,
+        title=doc.title,
+        content=doc.content,
+        correspondent=doc.correspondent.name if doc.correspondent else "",
+        correspondent_id=doc.correspondent.id if doc.correspondent else 0,
+        has_correspondent=doc.correspondent is not None,
+        # tag=tags if tags else "",
+        has_tag=len(tags) > 0,
+        type=doc.document_type.name if doc.document_type else "",
+        type_id=doc.document_type.id if doc.document_type else 0,
+        has_type=doc.document_type is not None,
+        created=datetime.combine(doc.created, time.min).isoformat(),
+        added=doc.added.isoformat(),
+        asn=asn or 0,
+        modified=doc.modified.isoformat(),
+        path=doc.storage_path.name if doc.storage_path else "",
+        path_id=doc.storage_path.id if doc.storage_path else 0,
+        has_path=doc.storage_path is not None,
+        notes=notes or "",
+        num_notes=len(notes),
+        custom_fields=custom_fields or "",
+        custom_field_count=len(doc.custom_fields.all()),
+        has_custom_fields=len(custom_fields) > 0,
+        owner=doc.owner.username if doc.owner else "",
+        owner_id=int(doc.owner.id if doc.owner and doc.owner.id else 0),
+        checksum=doc.checksum or "",
+        page_count=doc.page_count or 0,
+        original_filename=doc.original_filename,
+        is_shared=len(viewer_ids) > 0,
     )
+    for tag_id in tags_ids:
+        indexed_doc.add_integer("tag_id", tag_id)
+    for custom_fields_id in custom_fields_ids:
+        indexed_doc.add_integer("custom_fields_id", custom_fields_id)
+    for viewer_id in viewer_ids:
+        indexed_doc.add_integer("viewer_id", viewer_id)
+    writer.add_document(indexed_doc)
+    # print(indexed_doc)
     added_words = set()
     for word in tokenize_for_autocomplete(doc.content):
         if word not in added_words:
             added_words.add(word)
-            writer.add_document(
-                tantivy.Document(
-                    id=doc.pk,
-                    autocomplete_word=word,
-                    owner_id=doc.owner.id if doc.owner else 0,
-                    viewer_id=viewer_ids if viewer_ids else "",
-                ),
+            indexed_doc = tantivy.Document(
+                id=doc.pk,
+                autocomplete_word=word,
+                owner_id=int(doc.owner.id if doc.owner and doc.owner.id else 0),
             )
+            for viewer_id in viewer_ids:
+                indexed_doc.add_integer("viewer_id", viewer_id)
+            writer.add_document(indexed_doc)
+            # print(indexed_doc)
     logger.debug(f"Index updated for document {doc.pk}.")
 
 
@@ -265,10 +270,12 @@ class ResultsPage:
 
 
 class Hit:
-    def __init__(self, id, score, rank=None):
+    def __init__(self, id, score, rank=None, highlights=None, content=None):
         self.id = id
         self.score = score
         self.rank = rank
+        self._highlights = highlights
+        self.content = content
 
     def __getitem__(self, key):
         if key == "id":
@@ -276,10 +283,23 @@ class Hit:
         raise KeyError(key)
 
     def highlights(self, *args, **kwargs):
-        return None
+        text = kwargs.get("text", "")
+        # return None
+        # return text
+        if not self._highlights:
+            return None
+        result = self._highlights.replace("<b>", '<span class="match">').replace(
+            "</b>",
+            "</span>",
+        )
+        return result
 
     def __repr__(self):
         return f"Hit(id={self.id}, score={self.score}, rank={self.rank})"
+
+
+def byte_to_char_offset(text: str, byte_offset: int) -> int:
+    return len(text.encode("utf-8")[:byte_offset].decode("utf-8", errors="ignore"))
 
 
 class DelayedQuery:
@@ -430,6 +450,14 @@ class DelayedQuery:
             print(f"DB query took {time.time() - t1:.3f} seconds")
             print(3.1)
             print(search_result)
+            snippet_generator = tantivy.SnippetGenerator.create(
+                self.searcher,
+                q,
+                get_schema(),
+                "content",
+            )
+            snippet_generator.set_max_num_chars(500)
+            results = list()
             hit_scores = defaultdict(float)  # doc_id -> max score
             for score, doc_addr in search_result:
                 doc = self.searcher.doc(doc_addr)
@@ -446,10 +474,51 @@ class DelayedQuery:
                     hit_scores[doc_id] = max(hit_scores[doc_id], score)
                     # results.append(Hit(doc["id"][0], score))
                     print(3.4)
-            results = [Hit(doc_id, score) for doc_id, score in hit_scores.items()]
+
+                    # Generate highlights
+                    snippet = snippet_generator.snippet_from_doc(doc)
+                    # print(f"FOUND SNIPPET: {snippet.to_html()}")
+                    highlights = snippet.highlighted()
+                    # print(f"highlights: {highlights}")
+                    if highlights:
+                        # print(f"doc content : {doc['content'][0][:200]}[...]")
+                        print(f"fragment : {snippet.fragment()}")
+                        for highlight in highlights:
+                            start_char = byte_to_char_offset(
+                                doc["content"][0],
+                                highlight.start,
+                            )
+                            end_char = byte_to_char_offset(
+                                doc["content"][0],
+                                highlight.end,
+                            )
+                            print(
+                                f"# Doc n°{doc_id} highlight ({highlight.start}-{highlight.end}): {snippet.fragment()[highlight.start : highlight.end]}",
+                            )
+                            print(
+                                f"# Doc n°{doc_id} byte highlight ({start_char}-{end_char}): {snippet.fragment()[start_char:end_char]}",
+                            )
+                            # print(doc["content"][0][:200])
+                            # print(f"{highlight.start}-{highlight.end}: {doc['content'][0][highlight.start:highlight.end]}")
+                            print("")
+                            print("")
+
+                    # results.append(Hit(doc["id"][0], score, highlights, content=doc["content"][0]))
+                    results.append(
+                        Hit(
+                            doc["id"][0],
+                            score,
+                            highlights=snippet.to_html(),
+                            content=snippet.fragment(),
+                        ),
+                    )
+
+            # results = [Hit(doc_id, score) for doc_id, score in hit_scores.items()]
             # results = [r for r in search_result if r.get("id") in allowed_ids]
             for idx, hit in enumerate(results, start=1):
                 hit.rank = idx
+                # hit.highlights
+
             print(results)
             print(4)
             print(f"__getitem__ took {time.time() - t0:.3f} seconds")
@@ -677,96 +746,196 @@ class DelayedMoreLikeThisQuery(DelayedQuery):
 #     return queries
 
 
+# def autocomplete(
+#     ix: FileIndex,
+#     term: str,
+#     limit: int = 10,
+#     user: User | None = None,
+# ) -> list:
+#     """
+#     Mimics whoosh.reading.IndexReader.most_distinctive_terms with permissions
+#     and without scoring
+#     """
+#     terms = []
+#     with open_index() as index:
+#         searcher = index.searcher()
+#         # TODO: filter by user permissions
+#         perm_q = get_permissions_criterias(user)
+
+#         exact_q = tantivy.Query.term_query(
+#             schema=index.schema,
+#             field_name="autocomplete_word",
+#             field_value=term,
+#         )
+#         prefix_q = tantivy.Query.regex_query(
+#             schema=index.schema,
+#             field_name="autocomplete_word",
+#             regex_pattern=f"{term}.*",
+#         )
+#         q = tantivy.Query.boolean_query(
+#             [
+#                 (tantivy.Occur.Should, exact_q),
+#                 (tantivy.Occur.Should, prefix_q),
+#             ],
+#         )
+#         # searcher = index.searcher()
+#         search_result = searcher.search(q, limit=limit).hits
+#         exact_matches = []
+#         prefix_matches = []
+#         seen = set()
+#         # print(search_result)
+#         for _, doc_addr in search_result:
+#             doc = searcher.doc(doc_addr)
+#             # print(q.explain(self.searcher, doc_addr).to_json())
+#             word = doc["autocomplete_word"][0]
+#             if word in seen:
+#                 continue
+#             seen.add(word)
+#             if word == term.lower():
+#                 exact_matches.append(word)
+#             else:
+#                 prefix_matches.append(word)
+#         terms = exact_matches + prefix_matches
+#         # print(q.explain(searcher, doc_addr).to_json())
+#         # q = index.parse_query(
+#         #     term,
+#         #     [
+#         #         "content",
+#         #         "title",
+#         #         "correspondent",
+#         #         "tag",
+#         #         "type",
+#         #         "notes",
+#         #         "custom_fields",
+#         #     ],
+
+#         # )
+
+#         # mlt_query = tantivy.Query.more_like_this_query()
+#         # mlt_query.add_field("content")
+#         # mlt_query.like_text(user_input)
+
+#         # results = searcher.search(mlt_query, limit=10).hits
+#         # print(hits)
+
+#         # prefix_query = tantivy.Query.more_like_this_query()
+#         # prefix_query = tantivy.PrefixQuery(field, user_input.lower())
+#         # results = searcher.search(prefix_query, limit=10).hits
+#     # terms = []
+#     # TODO : support autocomplete in tantivy
+#     return terms[:limit]
+
+
 def autocomplete(
-    ix: FileIndex,
+    index,
     term: str,
     limit: int = 10,
     user: User | None = None,
-) -> list:
+) -> list[str]:
     """
-    Mimics whoosh.reading.IndexReader.most_distinctive_terms with permissions
-    and without scoring
+    Retourne les termes d'autocomplétion visible par l'utilisateur.
     """
-    terms = []
     with open_index() as index:
         searcher = index.searcher()
-        # TODO: filter by user permissions
+        schema = index.schema
 
-        exact_q = tantivy.Query.term_query(
-            schema=index.schema,
-            field_name="autocomplete_word",
-            field_value=term,
-        )
-        prefix_q = tantivy.Query.regex_query(
-            schema=index.schema,
-            field_name="autocomplete_word",
-            regex_pattern=f"{term}.*",
-        )
-        q = tantivy.Query.boolean_query(
+        # --- Queries principales : exact match + prefix ---
+        exact_q = tantivy.Query.term_query(schema, "autocomplete_word", term)
+        prefix_q = tantivy.Query.regex_query(schema, "autocomplete_word", f"{term}.*")
+
+        autocomplete_q = tantivy.Query.boolean_query(
             [
                 (tantivy.Occur.Should, exact_q),
                 (tantivy.Occur.Should, prefix_q),
             ],
         )
-        # searcher = index.searcher()
-        search_result = searcher.search(q, limit=limit).hits
-        exact_matches = []
-        prefix_matches = []
-        seen = set()
-        # print(search_result)
-        for _, doc_addr in search_result:
-            doc = searcher.doc(doc_addr)
-            # print(q.explain(self.searcher, doc_addr).to_json())
-            word = doc["autocomplete_word"][0]
+
+        # --- Permissions ---
+        perm_q = get_permissions_query(user, schema)
+        if perm_q is not None:
+            # Combine autocomplétion + permissions
+            final_q = tantivy.Query.boolean_query(
+                [
+                    (tantivy.Occur.Must, autocomplete_q),
+                    (tantivy.Occur.Must, perm_q),
+                ],
+            )
+        else:
+            final_q = autocomplete_q
+
+        # --- Recherche ---
+        hits = searcher.search(final_q, limit=limit).hits
+
+        # --- Extraction & dédoublonnage ---
+        seen, exact, prefix = set(), [], []
+        for _, addr in hits:
+            doc = searcher.doc(addr)
+            word = doc["autocomplete_word"][0].lower()
             if word in seen:
                 continue
             seen.add(word)
-            if word == term.lower():
-                exact_matches.append(word)
-            else:
-                prefix_matches.append(word)
-        terms = exact_matches + prefix_matches
-        # print(q.explain(searcher, doc_addr).to_json())
-        # q = index.parse_query(
-        #     term,
-        #     [
-        #         "content",
-        #         "title",
-        #         "correspondent",
-        #         "tag",
-        #         "type",
-        #         "notes",
-        #         "custom_fields",
-        #     ],
+            (exact if word == term.lower() else prefix).append(word)
 
-        # )
-
-        # mlt_query = tantivy.Query.more_like_this_query()
-        # mlt_query.add_field("content")
-        # mlt_query.like_text(user_input)
-
-        # results = searcher.search(mlt_query, limit=10).hits
-        # print(hits)
-
-        # prefix_query = tantivy.Query.more_like_this_query()
-        # prefix_query = tantivy.PrefixQuery(field, user_input.lower())
-        # results = searcher.search(prefix_query, limit=10).hits
-    # terms = []
-    # TODO : support autocomplete in tantivy
-    return terms[:limit]
+        return (exact + prefix)[:limit]
 
 
-def get_permissions_criterias(user: User | None = None) -> list:
-    user_criterias = [query.Term("has_owner", text=False)]
-    if user is not None:
-        if user.is_superuser:  # superusers see all docs
-            user_criterias = []
-        else:
-            user_criterias.append(query.Term("owner_id", user.id))
-            user_criterias.append(
-                query.Term("viewer_id", str(user.id)),
-            )
-    return user_criterias
+# def get_permissions_criterias(user: User | None = None) -> list:
+
+#                 #     q = tantivy.Query.boolean_query(
+#                 #     [
+#                 #         (tantivy.Occur.Should, q),
+#                 #         (tantivy.Occur.Should, fuzzy_q),
+#                 #     ],
+#                 # )
+#                     # query = TermQuery(Term(field, "true"))
+#     user_criterias = [(tantivy.Occur.should, tantivy.Query.term_query(
+#         schema=get_schema(),
+#         field_name="has_owner",
+#         field_value="false",
+#     ))]
+#     # user_criterias = [query.Term("has_owner", text=False)]
+#     if user is not None:
+#         if user.is_superuser:  # superusers see all docs
+#             user_criterias = []
+#         else:
+#             user_criterias.append((tantivy.Occur.should, tantivy.Query.term_query(
+#                 schema=get_schema(),
+#                 field_name="owner_id",
+#                 field_value=str(user.id))))
+#             # user_criterias.append(query.Term("owner_id", user.id))
+#             user_criterias.append((tantivy.Occur.should, tantivy.Query.term_query(
+#                 schema=get_schema(),
+#                 field_name="viewer_id",
+#                 field_value=str(user.id),
+#             )))
+#             # user_criterias.append(
+#             #     query.Term("viewer_id", str(user.id)),
+#             # )
+#     return user_criterias
+
+
+def get_permissions_query(user: User | None, schema) -> tantivy.Query | None:
+    """
+    Renvoie une Query tantivy filtrant les documents selon les permissions.
+    """
+    # No filter is super user
+    if user and user.is_superuser:
+        return None
+
+    # Always return documents with no owner
+    # queries = [tantivy.Query.term_query(schema, "has_owner", "false")]
+    queries = []
+
+    if user:
+        user_id = str(user.id)
+        queries.extend(
+            [
+                tantivy.Query.term_query(schema, "owner_id", int(user_id)),
+                tantivy.Query.term_query(schema, "viewer_id", int(user_id)),
+            ],
+        )
+
+    return tantivy.Query.boolean_query([(tantivy.Occur.Should, q) for q in queries])
 
 
 def rewrite_natural_date_keywords(query_string: str) -> str:
