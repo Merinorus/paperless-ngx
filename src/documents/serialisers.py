@@ -1215,11 +1215,11 @@ class DocumentSerializer(
 
 class SearchResultListSerializer(serializers.ListSerializer):
     def to_representation(self, hits):
-        print(f"hits: {hits}")
+        # print(f"hits: {hits}")
         document_ids = [hit["id"] for hit in hits]
         # Fetch all Document objects in the list in one SQL query.
         documents = self.child.fetch_documents(document_ids)
-        print(documents)
+        # print(documents)
         self.child.context["documents"] = documents
         # Also check if they are shared with other users / groups.
         self.child.context["shared_object_pks"] = self.child.get_shared_object_pks(
@@ -1261,15 +1261,6 @@ class SearchResultSerializer(DocumentSerializer):
             [str(c.note) for c in document.notes.all()],
         )
         r = super().to_representation(document)
-        # r["__search_hit__"] = {
-        #     "score": hit.score,
-        #     "highlights": hit.highlights("content", text=document.content),
-        #     # "note_highlights": (
-        #     #     hit.highlights("notes", text=notes) if document else None
-        #     # ),
-        #     "note_highlights": None,
-        #     "rank": hit.rank,
-        # }
 
         highlights = hit.highlights("content", text=document.content)
         score = (
@@ -1278,10 +1269,7 @@ class SearchResultSerializer(DocumentSerializer):
         r["__search_hit__"] = {
             "score": score,
             "highlights": highlights,
-            # "note_highlights": (
-            #     hit.highlights("notes", text=notes) if document else None
-            # ),
-            "note_highlights": None,
+            "note_highlights": None,  # TODO not implemented yet
             "rank": hit.rank,
         }
 

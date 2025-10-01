@@ -1333,20 +1333,20 @@ class UnifiedSearchViewSet(DocumentViewSet):
                     self.searcher = s
                     queryset = self.filter_queryset(self.get_queryset())
                     # TODO: This fails
-                    print(1)
-                    print(queryset)
+                    # print(1)
+                    # print(queryset)
                     page = self.paginate_queryset(queryset)
-                    print(2)
+                    # print(2)
                     serializer = self.get_serializer(page, many=True)
-                    print(3)
+                    # print(3)
                     response = self.get_paginated_response(serializer.data)
-                    print(4)
+                    # print(4)
                     # response.data["corrected_query"] = (
                     #     queryset.suggested_correction
                     #     if hasattr(queryset, "suggested_correction")
                     #     else None
                     # )
-                    print(5)
+                    # print(5)
                     return response
             except NotFound:
                 raise

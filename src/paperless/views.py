@@ -68,7 +68,7 @@ class StandardPagination(PageNumberPagination):
         )
 
     def get_all_result_ids(self):
-        print("get_all_result_ids")
+        # print("get_all_result_ids")
         query = self.page.paginator.object_list
         ids = []
         if isinstance(query, DelayedQuery):

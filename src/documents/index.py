@@ -415,7 +415,6 @@ class DelayedQuery:
         return self._manual_hits_cache
 
     def __getitem__(self, item):
-        print("DelayedQuery: __getitem__ begin")
         import time
 
         t0 = time.time()
@@ -435,29 +434,29 @@ class DelayedQuery:
         self.suggested_correction = suggested_correction
         sortedby, reverse = self._get_query_sortedby()
         pagenum = math.floor(item.start / self.page_size) + 1
-        print(f"pagenum: {pagenum}")
+        # print(f"pagenum: {pagenum}")
         pagelen = self.page_size
         offset = (pagenum - 1) * pagelen
-        print(f"offset: {offset}")
+        # print(f"offset: {offset}")
         t1 = time.time()
         search_result = self.searcher.search(
             q,
             limit=pagelen,
             offset=(pagenum - 1) * pagelen,
         ).hits
-        print(f"query and tantivy search took {time.time() - t1:.3f} seconds")
+        # print(f"query and tantivy search took {time.time() - t1:.3f} seconds")
         results = list()
-        print(2)
+        # print(2)
         # if self.filter_queryset:
         if self.filter_queryset is not None:
-            print(3)
+            # print(3)
             # print(self.filter_queryset)
             # print(self.filter_queryset.query)
             t1 = time.time()
             allowed_ids = set(self.filter_queryset.values_list("id", flat=True))
-            print(f"DB query took {time.time() - t1:.3f} seconds")
-            print(3.1)
-            print(search_result)
+            # print(f"DB query took {time.time() - t1:.3f} seconds")
+            # print(3.1)
+            # print(search_result)
             snippet_generator = tantivy.SnippetGenerator.create(
                 self.searcher,
                 q,
@@ -475,13 +474,13 @@ class DelayedQuery:
                 # print(doc_addr)
                 # print(doc)
                 # print(doc["id"])
-                print(3.2)
+                # print(3.2)
                 if doc_id in allowed_ids:
-                    print(3.3)
+                    # print(3.3)
                     # results.append({"id": doc["id"][0], "score": score})
                     hit_scores[doc_id] = max(hit_scores[doc_id], score)
                     # results.append(Hit(doc["id"][0], score))
-                    print(3.4)
+                    # print(3.4)
 
                     # Generate highlights
                     snippet = snippet_generator.snippet_from_doc(doc)
@@ -490,7 +489,7 @@ class DelayedQuery:
                     # print(f"highlights: {highlights}")
                     if highlights:
                         # print(f"doc content : {doc['content'][0][:200]}[...]")
-                        print(f"fragment : {snippet.fragment()}")
+                        # print(f"fragment : {snippet.fragment()}")
                         for highlight in highlights:
                             start_char = byte_to_char_offset(
                                 doc["content"][0],
@@ -500,16 +499,16 @@ class DelayedQuery:
                                 doc["content"][0],
                                 highlight.end,
                             )
-                            print(
-                                f"# Doc n°{doc_id} highlight ({highlight.start}-{highlight.end}): {snippet.fragment()[highlight.start : highlight.end]}",
-                            )
-                            print(
-                                f"# Doc n°{doc_id} byte highlight ({start_char}-{end_char}): {snippet.fragment()[start_char:end_char]}",
-                            )
+                            # print(
+                            #     f"# Doc n°{doc_id} highlight ({highlight.start}-{highlight.end}): {snippet.fragment()[highlight.start : highlight.end]}",
+                            # )
+                            # print(
+                            #     f"# Doc n°{doc_id} byte highlight ({start_char}-{end_char}): {snippet.fragment()[start_char:end_char]}",
+                            # )
                             # print(doc["content"][0][:200])
                             # print(f"{highlight.start}-{highlight.end}: {doc['content'][0][highlight.start:highlight.end]}")
-                            print("")
-                            print("")
+                            # print("")
+                            # print("")
 
                     # results.append(Hit(doc["id"][0], score, highlights, content=doc["content"][0]))
                     results.append(
@@ -527,14 +526,14 @@ class DelayedQuery:
                 hit.rank = idx
                 # hit.highlights
 
-            print(results)
-            print(4)
-            print(f"__getitem__ took {time.time() - t0:.3f} seconds")
+            # print(results)
+            # print(4)
+            # print(f"__getitem__ took {time.time() - t0:.3f} seconds")
         else:
             # TODO
             raise NotImplementedError
             results = [r for r in search_result]
-        print("DelayedQuery: __getitem__ end")
+        # print("DelayedQuery: __getitem__ end")
 
         page = {
             # "results": Document.objects.filter(id__in=results),
@@ -620,32 +619,10 @@ class DelayedFullTextQuery(DelayedQuery):
             fuzzy_search = False
         else:
             fuzzy_search = True
-        # qp = MultifieldParser(
-        #     [
-        #         "content",
-        #         "title",
-        #         "correspondent",
-        #         "tag",
-        #         "type",
-        #         "notes",
-        #         "custom_fields",
-        #     ],
-        #     # self.searcher.ixreader.schema,
-        #     get_schema()
-        # )
-        # qp.add_plugin(
-        #     DateParserPlugin(
-        #         basedate=django_timezone.now(),
-        #         dateparser=LocalDateParser(),
-        #     ),
-        # )
 
         # TODO: date parsing plugin like whoosh
         with open_index() as index:
-            # q = tantivy.Query.regex_query(schema=get_schema(), field_name="content", regex_pattern=f"{term}.*")
-            # q = tantivy.Query.fuzzy_term_query
             q = index.parse_query(
-                # fuzzy field: prefix (prefix must match) bool, distance int, transpose_cost_one (2 letters inverted cost 1 instead of 2): bool
                 q_str,
                 [
                     "content",
@@ -657,7 +634,6 @@ class DelayedFullTextQuery(DelayedQuery):
                     "custom_fields",
                 ],
                 field_boosts={"title": 5.0, "content": 0.5},
-                # "tag": 2.0, "correspondent": 2.0, "type": 2.0, "custom_fields": 2.0
             )
             if fuzzy_search:
                 # An exact match should outweigh a fuzzy one
@@ -684,7 +660,6 @@ class DelayedFullTextQuery(DelayedQuery):
                         "custom_fields": (True, 1, True),
                     },
                 )
-                # q = tantivy.Query.boolean_query(should=[q, fuzzy_q])
                 q = tantivy.Query.boolean_query(
                     [
                         (tantivy.Occur.Should, q),
