@@ -73,22 +73,10 @@ class StandardPagination(PageNumberPagination):
         ids = []
         if isinstance(query, DelayedQuery):
             try:
-                # ids = [
-                #     query.searcher.ixreader.stored_fields(
-                #         doc_num,
-                #     )["id"]
-                #     for doc_num in query.saved_results.get(0).results.docs()
-                # ]
-
-                # On prend toutes les pages déjà calculées dans saved_results
-                for hits in query.saved_results.values():
-                    ids.extend([hit.get("id") for hit in hits])
-                # Si tu veux vraiment tous les documents (hors pagination),
-                # il faudrait que DelayedQuery calcule toutes les pages ici
+                ids.extend(query.saved_results.get(0).doc_ids)
             except Exception as e:
                 print(f"Exception: {e}")
         else:
-            # ids = self.page.paginator.object_list.values_list("pk", flat=True)
             ids = list(query.values_list("pk", flat=True))
         return ids
 

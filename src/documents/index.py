@@ -279,11 +279,11 @@ class ResultsPage:
 
 class Hit:
     def __init__(self, id, score, rank=None, highlights=None, content=None):
-        self.id = id
-        self.score = score
-        self.rank = rank
-        self._highlights = highlights
-        self.content = content
+        self.id: int = id
+        self.score: float = score
+        self.rank: int = rank
+        self._highlights: str = highlights
+        self.content: str = content
 
     def __getitem__(self, key):
         if key == "id":
@@ -306,8 +306,51 @@ class Hit:
         return f"Hit(id={self.id}, score={self.score}, rank={self.rank})"
 
 
-def byte_to_char_offset(text: str, byte_offset: int) -> int:
-    return len(text.encode("utf-8")[:byte_offset].decode("utf-8", errors="ignore"))
+class TantivyResultsPage:
+    """
+    Taken from Whoosh ResultsPage object, for use with Tantivy.
+
+    This contains all results, but with a pagination system."""
+
+    def __init__(self, results: list[Hit], pagenum, pagelen):
+        self.results = results
+        self.total = len(results)
+
+        if pagenum < 1:
+            raise ValueError("pagenum must be >= 1")
+
+        self.pagecount = int(math.ceil(self.total / pagelen))
+        self.pagenum = min(self.pagecount, pagenum)
+        offset = (self.pagenum - 1) * pagelen
+        if (offset + pagelen) > self.total:
+            pagelen = self.total - offset
+        self.offset = offset
+        self.pagelen = pagelen
+
+    def __getitem__(self, n):
+        offset = self.offset
+        if isinstance(n, slice):
+            start, stop, step = n.indices(self.pagelen)
+            return self.results.__getitem__(slice(start + offset, stop + offset, step))
+        else:
+            return self.results.__getitem__(n + offset)
+
+    def __iter__(self):
+        return iter(self.results[self.offset : self.offset + self.pagelen])
+
+    def __len__(self):
+        return self.total
+
+    def docnum(self, n):
+        """Returns the document number of the hit at the nth position on this
+        page.
+        """
+        return self.results.docnum(n + self.offset)
+
+    @property
+    def doc_ids(self):
+        """Return the DB ids of the documents in the result page"""
+        return [result.id for result in self.results]
 
 
 class DelayedQuery:
@@ -368,53 +411,8 @@ class DelayedQuery:
         page = self[0:1]
         return len(page)
 
-    def _manual_sort_requested(self):
-        ordering = self.query_params.get("ordering", "")
-        return ordering.lstrip("-").startswith("custom_field_")
 
-    def _manual_hits(self):
-        if self._manual_hits_cache is None:
-            q, mask, suggested_correction = self._get_query()
-            self.suggested_correction = suggested_correction
-
-            results = self.searcher.search(
-                q,
-                mask=mask,
-                filter=MappedDocIdSet(self.filter_queryset, self.searcher.ixreader),
-                limit=None,
-            )
-            results.fragmenter = highlight.ContextFragmenter(surround=50)
-            results.formatter = HtmlFormatter(tagname="span", between=" ... ")
-
-            if not self.first_score and len(results) > 0:
-                self.first_score = results[0].score
-
-            if self.first_score:
-                results.top_n = [
-                    (
-                        (hit[0] / self.first_score) if self.first_score else None,
-                        hit[1],
-                    )
-                    for hit in results.top_n
-                ]
-
-            hits_by_id = {hit["id"]: hit for hit in results}
-            matching_ids = list(hits_by_id.keys())
-
-            ordered_ids = list(
-                self.filter_queryset.filter(id__in=matching_ids).values_list(
-                    "id",
-                    flat=True,
-                ),
-            )
-            ordered_ids = list(dict.fromkeys(ordered_ids))
-
-            self._manual_hits_cache = [
-                hits_by_id[_id] for _id in ordered_ids if _id in hits_by_id
-            ]
-        return self._manual_hits_cache
-
-    def __getitem__(self, item):
+    def __getitem__(self, item: slice):
         import time
 
         t0 = time.time()
@@ -441,7 +439,8 @@ class DelayedQuery:
         t1 = time.time()
         search_result = self.searcher.search(
             q,
-            limit=pagelen,
+            # limit=pagelen+1,
+            limit=10001,  # TODO set limit for performance?
             offset=(pagenum - 1) * pagelen,
         ).hits
         # print(f"query and tantivy search took {time.time() - t1:.3f} seconds")
@@ -484,33 +483,8 @@ class DelayedQuery:
 
                     # Generate highlights
                     snippet = snippet_generator.snippet_from_doc(doc)
-                    # print(f"FOUND SNIPPET: {snippet.to_html()}")
                     highlights = snippet.highlighted()
-                    # print(f"highlights: {highlights}")
-                    if highlights:
-                        # print(f"doc content : {doc['content'][0][:200]}[...]")
-                        # print(f"fragment : {snippet.fragment()}")
-                        for highlight in highlights:
-                            start_char = byte_to_char_offset(
-                                doc["content"][0],
-                                highlight.start,
-                            )
-                            end_char = byte_to_char_offset(
-                                doc["content"][0],
-                                highlight.end,
-                            )
-                            # print(
-                            #     f"# Doc n°{doc_id} highlight ({highlight.start}-{highlight.end}): {snippet.fragment()[highlight.start : highlight.end]}",
-                            # )
-                            # print(
-                            #     f"# Doc n°{doc_id} byte highlight ({start_char}-{end_char}): {snippet.fragment()[start_char:end_char]}",
-                            # )
-                            # print(doc["content"][0][:200])
-                            # print(f"{highlight.start}-{highlight.end}: {doc['content'][0][highlight.start:highlight.end]}")
-                            # print("")
-                            # print("")
 
-                    # results.append(Hit(doc["id"][0], score, highlights, content=doc["content"][0]))
                     results.append(
                         Hit(
                             doc["id"][0],
@@ -532,26 +506,14 @@ class DelayedQuery:
         else:
             # TODO
             raise NotImplementedError
-            results = [r for r in search_result]
-        # print("DelayedQuery: __getitem__ end")
 
-        page = {
-            # "results": Document.objects.filter(id__in=results),
-            "results": results,
-            # "total": search_result.total_hits,
-            # "page_number": pagenum,
-            # "page_size": self.page_size,
-            # TODO remove mock data
-            "pagenum": 1,
-            "pagelen": 50,
-            "total": 2,
-        }
-        return results
-        # return search_result
-        # search_result.hits
-        # return search_result.hits
-
-        # searcher.search(query, limit=offset+pagelen)[offset:offset+pagelen]
+        page = TantivyResultsPage(
+            results=results,
+            pagenum=math.floor(item.start / self.page_size) + 1,
+            pagelen=self.page_size,
+        )
+        self.saved_results[item.start] = page
+        return page
 
         page: ResultsPage = self.searcher.search_page(
             q,
