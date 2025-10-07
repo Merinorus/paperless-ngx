@@ -1320,6 +1320,7 @@ class UnifiedSearchViewSet(DocumentViewSet):
                 self.request.query_params,
                 self.paginator.get_page_size(self.request),
                 filter_queryset=filtered_queryset,
+                user=self.request.user,
             )
         else:
             return filtered_queryset
@@ -1341,11 +1342,11 @@ class UnifiedSearchViewSet(DocumentViewSet):
                     # print(3)
                     response = self.get_paginated_response(serializer.data)
                     # print(4)
-                    # response.data["corrected_query"] = (
-                    #     queryset.suggested_correction
-                    #     if hasattr(queryset, "suggested_correction")
-                    #     else None
-                    # )
+                    response.data["corrected_query"] = (
+                        queryset.suggested_correction
+                        if hasattr(queryset, "suggested_correction")
+                        else None
+                    )
                     # print(5)
                     return response
             except NotFound:

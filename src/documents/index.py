@@ -393,6 +393,7 @@ class DelayedQuery:
         query_params,
         page_size,
         filter_queryset: QuerySet,
+        user=None,
     ) -> None:
         self.searcher = searcher
         self.query_params = query_params
@@ -401,7 +402,7 @@ class DelayedQuery:
         self.first_score = None
         self.filter_queryset = filter_queryset
         self.suggested_correction = None
-        self._manual_hits_cache: list | None = None
+        self.user = user
 
     def __len__(self) -> int:
         if self._manual_sort_requested():
@@ -628,20 +629,15 @@ class DelayedFullTextQuery(DelayedQuery):
                         (tantivy.Occur.Should, fuzzy_q),
                     ],
                 )
-        suggested_correction = None
-        # TODO: corrections not available in tantivy?
-        # try:
-        #     corrected = self.searcher.correct_query(q, q_str)
-        #     if corrected.string != q_str:
-        #         suggested_correction = corrected.string
-        # except Exception as e:
-        #     logger.info(
-        #         "Error while correcting query %s: %s",
-        #         f"{q_str!r}",
-        #         e,
-        #     )
+            words = autocomplete(
+                index,
+                q_str,
+                limit=1,
+                user=self.user,
+                fuzzy_search=True,
+            )
+            suggested_correction = words[0] if words and words[0] != q_str else None
 
-        # return q, None, suggested_correction
         return q, None, suggested_correction
 
 
@@ -672,6 +668,7 @@ def autocomplete(
     term: str,
     limit: int = 10,
     user: User | None = None,
+    fuzzy_search=False,
 ) -> list[str]:
     with open_index() as index:
         result: list[str] = list()
@@ -693,11 +690,21 @@ def autocomplete(
             result.append(term)
 
         # Find prefixed terms until limit is reached
-        prefix_subquery = tantivy.Query.regex_query(
-            schema,
-            "autocomplete_word",
-            f"{term}.*",
-        )
+        if fuzzy_search:
+            prefix_subquery = tantivy.Query.fuzzy_term_query(
+                schema,
+                "autocomplete_word",
+                term,
+                1,
+                True,
+                True,
+            )
+        else:
+            prefix_subquery = tantivy.Query.regex_query(
+                schema,
+                "autocomplete_word",
+                f"{term}.*",
+            )
         seen = set()
         remaining_limit = limit - len(result)
         while len(result) < limit:
