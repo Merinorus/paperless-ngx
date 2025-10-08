@@ -46,7 +46,7 @@ index_dir = f"{settings.INDEX_DIR}_tantivy"
 def get_schema():
     sb = tantivy.SchemaBuilder()
     # TODO are all the has_ really needed?
-    sb.add_integer_field("id", stored=True)
+    sb.add_integer_field("id", stored=True, indexed=True)
     sb.add_text_field("title", stored=True)
     sb.add_text_field("autocomplete_word", stored=True)
     sb.add_text_field("content", stored=True)  # pas nécessairement stored
@@ -109,9 +109,9 @@ def open_index(*, recreate=False, reload=True):
 
 
 @contextmanager
-def open_index_writer(**kwargs):
-    with open_index(reload=False) as index:
-        writer = index.writer(num_threads=os.cpu_count())
+def open_index_writer(reload=True, **kwargs):
+    with open_index(reload=reload) as index:
+        writer = index.writer(num_threads=os.cpu_count() or 0)
         try:
             yield writer
         except Exception as e:
@@ -163,8 +163,11 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
         only_with_perms_in=["view_document"],
     )
     viewer_ids = [int(u.id) for u in users_with_perms]
-    writer.delete_documents("id", doc.pk)
-    # print(f"owner id: {int(doc.owner.id if doc.owner and doc.owner.id else 0)} (type: {type(int(doc.owner.id if doc.owner and doc.owner.id else 0))})")
+
+    writer.delete_documents_by_query(
+        tantivy.Query.term_query(get_schema(), "id", doc.pk),
+    )
+
     indexed_doc = tantivy.Document(
         id=doc.pk,
         title=doc.title,
@@ -204,7 +207,6 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
     for viewer_id in viewer_ids:
         indexed_doc.add_integer("viewer_id", viewer_id)
     writer.add_document(indexed_doc)
-    # print(indexed_doc)
     added_words = set()
     for word in tokenize_for_autocomplete(doc.content):
         if word not in added_words:
@@ -226,7 +228,9 @@ def remove_document(writer: tantivy.IndexWriter, doc: Document) -> None:
 
 
 def remove_document_by_id(writer: tantivy.IndexWriter, doc_id) -> None:
-    writer.delete_documents("id", doc_id)
+    writer.delete_documents_by_query(
+        tantivy.Query.term_query(get_schema(), "id", doc_id),
+    )
 
 
 def add_or_update_document(document: Document) -> None:
@@ -278,25 +282,33 @@ class ResultsPage:
 
 
 class Hit:
-    def __init__(self, id, score, rank=None, highlights=None, content=None):
+    def __init__(
+        self,
+        id,
+        score,
+        rank=None,
+        content=None,
+        highlights=None,
+        note_highlights=None,
+    ):
         self.id: int = id
         self.score: float = score
         self.rank: int = rank
-        self._highlights: str = highlights
         self.content: str = content
+        self._highlights: str = highlights
+        self._note_highlights: str = note_highlights
 
     def __getitem__(self, key):
         if key == "id":
             return self.id
         raise KeyError(key)
 
-    def highlights(self, *args, **kwargs):
-        # text = kwargs.get("text", "")
-        # return None
-        # return text
-        if not self._highlights:
-            return None
-        result = self._highlights.replace("<b>", '<span class="match">').replace(
+    def highlights(self, field, *args, **kwargs):
+        if field == "notes":
+            text = self._note_highlights
+        else:
+            text = self._highlights
+        result = text.replace("<b>", '<span class="match">').replace(
             "</b>",
             "</span>",
         )
@@ -399,6 +411,7 @@ class DelayedQuery:
         self.query_params = query_params
         self.page_size = page_size
         self.saved_results = dict()
+        self.doc_id_hits = set()
         self.first_score = None
         self.filter_queryset = filter_queryset
         self.suggested_correction = None
@@ -457,25 +470,27 @@ class DelayedQuery:
             # print(f"DB query took {time.time() - t1:.3f} seconds")
             # print(3.1)
             # print(search_result)
-            snippet_generator = tantivy.SnippetGenerator.create(
+            content_snippet_generator = tantivy.SnippetGenerator.create(
                 self.searcher,
                 q,
                 get_schema(),
                 "content",
             )
-            snippet_generator.set_max_num_chars(550)
+            content_snippet_generator.set_max_num_chars(550)
+            note_snippet_generator = tantivy.SnippetGenerator.create(
+                self.searcher,
+                q,
+                get_schema(),
+                "notes",
+            )
+            note_snippet_generator.set_max_num_chars(100)
             results = list()
             hit_scores = defaultdict(float)  # doc_id -> max score
             for score, doc_addr in search_result:
                 doc = self.searcher.doc(doc_addr)
-                # print(q.explain(self.searcher, doc_addr).to_json())
                 doc_id = doc["id"][0]
-                # print(score)
-                # print(doc_addr)
-                # print(doc)
-                # print(doc["id"])
-                # print(3.2)
-                if doc_id in allowed_ids:
+                if doc_id in allowed_ids and doc_id not in self.doc_id_hits:
+                    self.doc_id_hits.add(doc_id)
                     # print(3.3)
                     # results.append({"id": doc["id"][0], "score": score})
                     hit_scores[doc_id] = max(hit_scores[doc_id], score)
@@ -483,15 +498,16 @@ class DelayedQuery:
                     # print(3.4)
 
                     # Generate highlights
-                    snippet = snippet_generator.snippet_from_doc(doc)
-                    highlights = snippet.highlighted()
+                    content_snippet = content_snippet_generator.snippet_from_doc(doc)
+                    note_snippet = note_snippet_generator.snippet_from_doc(doc)
 
                     results.append(
                         Hit(
                             doc["id"][0],
                             score,
-                            highlights=snippet.to_html(),
-                            content=snippet.fragment(),
+                            content=content_snippet.fragment(),
+                            highlights=content_snippet.to_html(),
+                            note_highlights=note_snippet.to_html(),
                         ),
                     )
 

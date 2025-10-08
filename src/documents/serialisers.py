@@ -1262,14 +1262,15 @@ class SearchResultSerializer(DocumentSerializer):
         )
         r = super().to_representation(document)
 
-        highlights = hit.highlights("content", text=document.content)
+        highlights = hit.highlights("content")
+        note_highlights = hit.highlights("notes")
         score = (
             hit.score if highlights else None
         )  # Hide score in front-end if no text highlight
         r["__search_hit__"] = {
             "score": score,
             "highlights": highlights,
-            "note_highlights": None,  # TODO not implemented yet
+            "note_highlights": note_highlights,
             "rank": hit.rank,
         }
 
