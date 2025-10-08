@@ -617,8 +617,7 @@ class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         q_str = self.query_params["query"]
         q_str = rewrite_natural_date_keywords(q_str)
-        bigram_q_str = extract_bigram_content(q_str)
-        if len(q_str) <= 3 or "NOT " in q_str:
+        if len(q_str) <= 3:
             fuzzy_search = False
         else:
             fuzzy_search = True
@@ -630,6 +629,7 @@ class DelayedFullTextQuery(DelayedQuery):
                 q_str,
                 [
                     "content",
+                    "bigram_content",
                     "title",
                     "correspondent",
                     "tag",
@@ -647,6 +647,7 @@ class DelayedFullTextQuery(DelayedQuery):
                     q_str,
                     [
                         "content",
+                        "bigram_content",
                         "title",
                         "correspondent",
                         "tag",
@@ -654,7 +655,7 @@ class DelayedFullTextQuery(DelayedQuery):
                         "notes",
                         "custom_fields",
                     ],
-                    field_boosts={"title": 5.0, "content": 0.5},
+                    field_boosts={"title": 3.0, "content": 0.5},
                     fuzzy_fields={
                         "content": (True, 1, True),
                         "title": (True, 1, True),
@@ -665,10 +666,7 @@ class DelayedFullTextQuery(DelayedQuery):
                         "custom_fields": (True, 1, True),
                     },
                 )
-                queries.append(fuzzy_q)
-            if bigram_q_str:
-                bigram_q = index.parse_query(bigram_q_str, ["bigram_content"])
-                queries.append(bigram_q)
+                queries.append(tantivy.Query.boost_query(fuzzy_q, 0.1))
             q = tantivy.Query.boolean_query(
                 [(tantivy.Occur.Should, q) for q in queries],
             )
@@ -733,21 +731,26 @@ def autocomplete(
             result.append(term)
 
         # Find prefixed terms until limit is reached
-        if fuzzy_search:
-            prefix_subquery = tantivy.Query.fuzzy_term_query(
-                schema,
-                "autocomplete_word",
-                term,
-                1,
-                True,
-                True,
-            )
-        else:
-            prefix_subquery = tantivy.Query.regex_query(
-                schema,
-                "autocomplete_word",
-                f"{term}.*",
-            )
+        try:
+            if fuzzy_search:
+                prefix_subquery = tantivy.Query.fuzzy_term_query(
+                    schema,
+                    "autocomplete_word",
+                    term,
+                    1,
+                    True,
+                    True,
+                )
+            else:
+                prefix_subquery = tantivy.Query.regex_query(
+                    schema,
+                    "autocomplete_word",
+                    f"{term}.*",
+                )
+        except ValueError as e:
+            # Autocomplete doesn't support special terms, e.g. parentheses, +, - etc.
+            logger.debug(f"{e}")
+            return []
         seen = set()
         remaining_limit = limit - len(result)
         while len(result) < limit:
