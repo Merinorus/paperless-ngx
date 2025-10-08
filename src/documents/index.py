@@ -411,7 +411,6 @@ class DelayedQuery:
         self.query_params = query_params
         self.page_size = page_size
         self.saved_results = dict()
-        self.doc_id_hits = set()
         self.first_score = None
         self.filter_queryset = filter_queryset
         self.suggested_correction = None
@@ -489,8 +488,7 @@ class DelayedQuery:
             for score, doc_addr in search_result:
                 doc = self.searcher.doc(doc_addr)
                 doc_id = doc["id"][0]
-                if doc_id in allowed_ids and doc_id not in self.doc_id_hits:
-                    self.doc_id_hits.add(doc_id)
+                if doc_id in allowed_ids:
                     # print(3.3)
                     # results.append({"id": doc["id"][0], "score": score})
                     hit_scores[doc_id] = max(hit_scores[doc_id], score)
@@ -516,7 +514,6 @@ class DelayedQuery:
             for idx, hit in enumerate(results, start=1):
                 hit.rank = idx
                 # hit.highlights
-
             # print(results)
             # print(4)
             # print(f"__getitem__ took {time.time() - t0:.3f} seconds")
