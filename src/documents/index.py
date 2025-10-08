@@ -613,6 +613,21 @@ class LocalDateParser(English):
         return d
 
 
+def rewrite_default_and_keywords(query_string: str) -> str:
+    """
+    Separate keywords by AND when natural query language isn't detected.
+    """
+    if not any(
+        [
+            w in query_string
+            for w in ("AND", "OR", "NOT", "TO", "+", "-", "(", ")", '"')
+        ],
+    ):
+        # No natural language detected, so separate by AND
+        query_string = re.sub(r"\s+", " AND ", query_string.strip())
+    return query_string
+
+
 class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         q_str = self.query_params["query"]
@@ -621,6 +636,7 @@ class DelayedFullTextQuery(DelayedQuery):
             fuzzy_search = False
         else:
             fuzzy_search = True
+        q_str = rewrite_default_and_keywords(q_str)
 
         # TODO: date parsing plugin like whoosh
         with open_index() as index:
