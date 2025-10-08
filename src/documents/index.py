@@ -64,10 +64,18 @@ bigram_analyzer: tantivy.TextAnalyzer = tantivy.TextAnalyzerBuilder(
 
 @lru_cache(maxsize=1)
 def get_schema():
+    """
+    Prepare the Tantivy index schema.
+
+    index_options: for text fields. "position" is default (frequency and position), "frequency" or "basic".
+    stored: whether the field is stored and can be retrieved directly.
+    fast: whether the field is stored in a columnar fashion, needed for sorting.
+    indexed: needed for integer fields to be searchable.
+    """
     sb = tantivy.SchemaBuilder()
     # TODO are all the has_ really needed?
     sb.add_integer_field("id", stored=True, indexed=True)
-    sb.add_text_field("title", stored=True, index_option="basic")
+    sb.add_text_field("title", stored=True, fast=True, index_option="basic")
     sb.add_text_field("autocomplete_word", stored=True, index_option="basic")
     sb.add_text_field("content", stored=True)
     sb.add_text_field(
@@ -75,35 +83,35 @@ def get_schema():
         tokenizer_name="bigram_analyzer",
         index_option="freq",
     )  # used for languages such as CJK
-    sb.add_integer_field("asn", stored=True)
-    sb.add_text_field("correspondent", stored=True, index_option="basic")
+    sb.add_integer_field("asn", stored=True, fast=True)
+    sb.add_text_field("correspondent", stored=True, fast=True, index_option="basic")
     sb.add_integer_field("correspondent_id", stored=True)
     sb.add_boolean_field("has_correspondent", stored=True)
     sb.add_text_field("tag", stored=True, index_option="basic")
     sb.add_integer_field("tag_id", stored=True)
     sb.add_boolean_field("has_tag", stored=True)
-    sb.add_text_field("type", stored=True, index_option="basic")
+    sb.add_text_field("type", stored=True, fast=True, index_option="basic")
     sb.add_integer_field("type_id", stored=True)
     sb.add_boolean_field("has_type", stored=True)
-    sb.add_date_field("created", stored=True)  # UNIX timestamp or ISO string
-    sb.add_date_field("modified", stored=True)
-    sb.add_date_field("added", stored=True)
+    sb.add_date_field("created", stored=True, fast=True)  # UNIX timestamp or ISO string
+    sb.add_date_field("modified", stored=True, fast=True)
+    sb.add_date_field("added", stored=True, fast=True)
     sb.add_text_field("path", stored=True, index_option="basic")
     sb.add_integer_field("path_id", stored=True)
     sb.add_boolean_field("has_path", stored=True)
     sb.add_text_field("notes", stored=True)
-    sb.add_integer_field("num_notes", stored=True)
+    sb.add_integer_field("num_notes", stored=True, fast=True)
     sb.add_text_field("custom_fields", stored=True, index_option="basic")
     sb.add_integer_field("custom_field_count", stored=True)
     # sb.add_text_field("custom_fields_id", stored=True)
     sb.add_integer_field("custom_fields_id", stored=True)
     sb.add_boolean_field("has_custom_fields", stored=True)
-    sb.add_text_field("owner", stored=True, index_option="basic")
+    sb.add_text_field("owner", stored=True, fast=True, index_option="basic")
     sb.add_integer_field("owner_id", stored=True, indexed=True)
     sb.add_boolean_field("has_owner", indexed=True)
     sb.add_integer_field("viewer_id", stored=True, indexed=True)
     sb.add_text_field("checksum", stored=True, index_option="basic")
-    sb.add_integer_field("page_count", stored=True)
+    sb.add_integer_field("page_count", stored=True, fast=True)
     sb.add_text_field("original_filename", stored=True, index_option="basic")
     sb.add_boolean_field("is_shared", stored=True)  # or integer 0/1
 
@@ -471,6 +479,7 @@ class DelayedQuery:
         q, mask, suggested_correction = self._get_query()
         self.suggested_correction = suggested_correction
         sortedby, reverse = self._get_query_sortedby()
+        order = tantivy.Order.Desc if reverse else tantivy.Order.Asc
         pagenum = math.floor(item.start / self.page_size) + 1
         # print(f"pagenum: {pagenum}")
         pagelen = self.page_size
@@ -482,6 +491,8 @@ class DelayedQuery:
             # limit=pagelen+1,
             limit=10001,  # TODO set limit for performance?
             offset=(pagenum - 1) * pagelen,
+            order_by_field=sortedby,
+            order=order,
         ).hits
         # print(f"query and tantivy search took {time.time() - t1:.3f} seconds")
         results = list()
