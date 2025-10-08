@@ -1529,6 +1529,34 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz", hash = "sha256:cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0", size = 981474, upload-time = "2021-05-07T07:54:13.562Z" }
 
 [[package]]
+name = "lindera-py"
+version = "0.45.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/50/dc/2a01e68fa03dd6354e2de177c42901f2f3e1d031797c0ffc12e138307b66/lindera_py-0.45.0.tar.gz", hash = "sha256:9bc0be02c5ae4cc49ec9e7da55644e02244cb791b5bd8f72e608883316dfedb1", size = 148590, upload_time = "2025-08-02T14:18:51.302Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/30/06/8497e918ced8a6faea97d0b510b126e8cd00084dc526bface87be70e45c0/lindera_py-0.45.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:2d6a5a550cf54d0e10fbc11b816a605e316c3806a5931d666c8e8968041d5a35", size = 41832440, upload_time = "2025-08-02T14:17:21.547Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/ae/043ff6fcb9fcc9b2e0c893a06a970f43b4b2d6f7e95458d96e1227419b6e/lindera_py-0.45.0-cp310-cp310-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:afa645ea8b568ea4d8363d4739269009fd17757b265d938cb7201f5da6b252cd", size = 41907788, upload_time = "2025-08-02T14:17:55.207Z" },
+    { url = "https://files.pythonhosted.org/packages/df/87/364e32958e324d08b122c0acc28de592b197ac49f375767c3491efc2ef4d/lindera_py-0.45.0-cp311-cp311-macosx_10_12_x86_64.whl", hash = "sha256:858aa7eff011cee9a642308be0c8f9bc6945b040d54cd49d532aa2676b4e32b4", size = 41740953, upload_time = "2025-08-02T14:18:29.071Z" },
+    { url = "https://files.pythonhosted.org/packages/79/75/d49ab52c7e05a690aea12a034c86459bfd31ff3e1fb822a896fdc4522f4d/lindera_py-0.45.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:ca861a06f2128949605c40fa489f6950a9b4913671b9ca39f128834a1dda7479", size = 41984711, upload_time = "2025-08-02T14:18:20.649Z" },
+    { url = "https://files.pythonhosted.org/packages/5d/e6/464b60d15c4c360f4f5611adb9280a752a6a8576871c83de45bee9bcfa2f/lindera_py-0.45.0-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:892e3e0dd24d00c2658e1a776d47b7c82d64fc9dde5ae535156bf4ea67d6d970", size = 41835098, upload_time = "2025-08-02T14:17:25.027Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/58/6231fd5d600565d2f4f8348edf887855858a6da0ebc219f65fa17933f165/lindera_py-0.45.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b01099b90c4a18bced3486c38cf2122107f7ae40ca8520b4272ee490f9dc6fde", size = 41908104, upload_time = "2025-08-02T14:17:57.731Z" },
+    { url = "https://files.pythonhosted.org/packages/68/37/1ee66cdb2f7d311a7778c59faa5329bb5fa355ec944d4cc1107e0bd20ff3/lindera_py-0.45.0-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:d16b629ef59a2be73637a0e0db1c2637adf466aa79dc052a2df5da444ccf8e1b", size = 41736097, upload_time = "2025-08-02T14:18:31.988Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/66/77af3157087dba1554449954356cfbbb3d7fae22ea84651beee890cfa418/lindera_py-0.45.0-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:9d7113c335ca7402915cf024e189f3c1beb7a96f1ca7ffa628ebe2a4da252346", size = 41980066, upload_time = "2025-08-02T14:18:23.694Z" },
+    { url = "https://files.pythonhosted.org/packages/2c/98/8f6c8b3e616341a2fb2624950fb69296a60031d871ae1f0357bc6db35b9f/lindera_py-0.45.0-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:e3cc54b90c1942296832fd04c2147bb290b01fa2d354a82704e0af8d96c3d431", size = 41832993, upload_time = "2025-08-02T14:17:28.008Z" },
+    { url = "https://files.pythonhosted.org/packages/58/b7/2b18bbd99fe6bb50484c9dac705cae10c42cc78ff0cafddee5922900f102/lindera_py-0.45.0-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:650794bc38b13c9cbb01efd398d23e45658ef1488c896fc1bccb0dcae6e1fe8c", size = 41907642, upload_time = "2025-08-02T14:18:00.542Z" },
+    { url = "https://files.pythonhosted.org/packages/1b/a9/0cc895b0bd7ca3feea9d8dc48293f2f4737886d191240a7366f895b0ff36/lindera_py-0.45.0-cp313-cp313-macosx_10_12_x86_64.whl", hash = "sha256:0f1b907b7eaeb585efe63a8166840fda274a1e77e752ce18c82e51b3f483e704", size = 41736053, upload_time = "2025-08-02T14:18:34.815Z" },
+    { url = "https://files.pythonhosted.org/packages/47/90/0491d0082cab45c4ea81983e5ed4636a05f3486e20ba4985fa39d6799083/lindera_py-0.45.0-cp313-cp313-macosx_11_0_arm64.whl", hash = "sha256:ec4067ec92b17acd883742fb590947bf43c16b855240b6153fa00c6fe68a5cea", size = 41979207, upload_time = "2025-08-02T14:18:26.354Z" },
+    { url = "https://files.pythonhosted.org/packages/44/bd/6371f79d352a9f744d1ea34d0b13686c58b5f37399d0febc45af3798d904/lindera_py-0.45.0-cp313-cp313-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:b23e0e03c60089c6bd8ff597b1379e89bf52c98da5cecac903cc2c7155179517", size = 41832055, upload_time = "2025-08-02T14:17:30.605Z" },
+    { url = "https://files.pythonhosted.org/packages/6c/69/e231c654817952c8b527a78074ff3444cbdf0ff2216136e4769837201947/lindera_py-0.45.0-cp313-cp313-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1a2e492a9822b0ace6c667cef7d535afed6e1f576d4e712a44626cfcfef60558", size = 41907234, upload_time = "2025-08-02T14:18:03.086Z" },
+    { url = "https://files.pythonhosted.org/packages/56/00/421f844043a6cba288b42d6f8b535cb2a6b99e7554cbe34e0c0a87d2d4c9/lindera_py-0.45.0-cp313-cp313t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:892a035ae6a2016744a9600e65c443dcab2a414649c1c1d89c18985109cedea0", size = 41833132, upload_time = "2025-08-02T14:17:34.021Z" },
+    { url = "https://files.pythonhosted.org/packages/fc/cf/154953017d0daa7e6c7d0a2098ef926e39f509f213dce74cf208b1b40ff4/lindera_py-0.45.0-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:d854cb3e78471ead75213c905cb5628cc1fb5a8c923305337e24c1cdd8714050", size = 41907868, upload_time = "2025-08-02T14:18:06.327Z" },
+    { url = "https://files.pythonhosted.org/packages/82/df/b797ba8a00c39a340d7297a5a8f6b76e045685594456b5a0a7136fa0aecf/lindera_py-0.45.0-pp310-pypy310_pp73-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:79445f67ac5710591773742a81b4cc50e9d37651143b5c2d346986d4f93ae2fc", size = 41835481, upload_time = "2025-08-02T14:17:45.737Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/1d/1d588512ec54c6feca120c60947d5e70e12a70911ca1279ec9b987c665d4/lindera_py-0.45.0-pp310-pypy310_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8730607efaab63efd7d354151108b50d614f8feb426676f63c0ee673bffa6cb9", size = 41909866, upload_time = "2025-08-02T14:18:15.206Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/23/72eded314138d4b543fdb74c8c82e685b9287b9aa6d981c92d4d4f67d263/lindera_py-0.45.0-pp311-pypy311_pp73-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:de8b3834441c300dc7eef1866b120e66880bd096a2f60d2cdd42bcc76a1df899", size = 41835143, upload_time = "2025-08-02T14:17:48.745Z" },
+    { url = "https://files.pythonhosted.org/packages/66/f6/021b5df3d252386fb2f49f7f3bbe6b9d54862d7b287df54c368740d4fcb2/lindera_py-0.45.0-pp311-pypy311_pp73-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:dd3e77b76c24af68dc745a22900d8eb4c20198a5c12d55a57dfb7dd954f8c40a", size = 41909451, upload_time = "2025-08-02T14:18:17.949Z" },
+]
+
+[[package]]
 name = "lindera-python-cjk"
 version = "1.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2174,6 +2202,7 @@ dependencies = [
     { name = "inotifyrecursive", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "jinja2", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "langdetect", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
+    { name = "lindera-py", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "lindera-python-cjk", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "nltk", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
     { name = "ocrmypdf", marker = "sys_platform == 'darwin' or sys_platform == 'linux'" },
@@ -2313,6 +2342,7 @@ requires-dist = [
     { name = "inotifyrecursive", specifier = "~=0.3" },
     { name = "jinja2", specifier = "~=3.1.5" },
     { name = "langdetect", specifier = "~=1.0.9" },
+    { name = "lindera-py", specifier = ">=0.45.0" },
     { name = "lindera-python-cjk", specifier = "~=1.2.0" },
     { name = "mysqlclient", marker = "extra == 'mariadb'", specifier = "~=2.2.7" },
     { name = "nltk", specifier = "~=3.9.1" },
