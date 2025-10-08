@@ -41,6 +41,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger("paperless.index")
 index_dir = f"{settings.INDEX_DIR}_tantivy"
 
+CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+")
+
+
+def extract_bigram_content(text: str) -> str:
+    """
+    Extract relevant bigrams from a given text.
+
+    This is used for languages that cannot be properly indexed with simple tokenizer,
+    such as CJK languages.
+    """
+    cjk_sequences = CJK_RE.findall(text)
+    return " ".join(cjk_sequences)
+
+
+# In Tantivy, a text analyzer is a pipeline of
+# a tokenizer, optionally followed by filters.
+bigram_analyzer: tantivy.TextAnalyzer = tantivy.TextAnalyzerBuilder(
+    tantivy.Tokenizer.ngram(2, 2),
+).build()
+
 
 @lru_cache(maxsize=1)
 def get_schema():
@@ -49,7 +69,11 @@ def get_schema():
     sb.add_integer_field("id", stored=True, indexed=True)
     sb.add_text_field("title", stored=True)
     sb.add_text_field("autocomplete_word", stored=True)
-    sb.add_text_field("content", stored=True)  # pas nécessairement stored
+    sb.add_text_field("content", stored=True)
+    sb.add_text_field(
+        "bigram_content",
+        tokenizer_name="bigram_analyzer",
+    )  # used for languages such as CJK
     sb.add_integer_field("asn", stored=True)
     sb.add_text_field("correspondent", stored=True)
     sb.add_integer_field("correspondent_id", stored=True)
@@ -98,6 +122,7 @@ def open_index(*, recreate=False, reload=True):
         recreate_index_dir(path)
     try:
         index = tantivy.Index(schema=get_schema(), path=path)
+        index.register_tokenizer("bigram_analyzer", bigram_analyzer)
     except ValueError as e:
         # Schema has changed
         logger.warning(f"Recreating index due to error: {e}")
@@ -172,6 +197,7 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
         id=doc.pk,
         title=doc.title,
         content=doc.content,
+        bigram_content=extract_bigram_content(doc.content),
         correspondent=doc.correspondent.name if doc.correspondent else "",
         correspondent_id=doc.correspondent.id if doc.correspondent else 0,
         has_correspondent=doc.correspondent is not None,
@@ -591,6 +617,7 @@ class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         q_str = self.query_params["query"]
         q_str = rewrite_natural_date_keywords(q_str)
+        bigram_q_str = extract_bigram_content(q_str)
         if len(q_str) <= 3 or "NOT " in q_str:
             fuzzy_search = False
         else:
@@ -598,6 +625,7 @@ class DelayedFullTextQuery(DelayedQuery):
 
         # TODO: date parsing plugin like whoosh
         with open_index() as index:
+            queries = list()
             q = index.parse_query(
                 q_str,
                 [
@@ -611,6 +639,7 @@ class DelayedFullTextQuery(DelayedQuery):
                 ],
                 field_boosts={"title": 5.0, "content": 0.5},
             )
+            queries.append(q)
             if fuzzy_search:
                 # An exact match should outweigh a fuzzy one
                 fuzzy_q = index.parse_query(
@@ -636,12 +665,13 @@ class DelayedFullTextQuery(DelayedQuery):
                         "custom_fields": (True, 1, True),
                     },
                 )
-                q = tantivy.Query.boolean_query(
-                    [
-                        (tantivy.Occur.Should, q),
-                        (tantivy.Occur.Should, fuzzy_q),
-                    ],
-                )
+                queries.append(fuzzy_q)
+            if bigram_q_str:
+                bigram_q = index.parse_query(bigram_q_str, ["bigram_content"])
+                queries.append(bigram_q)
+            q = tantivy.Query.boolean_query(
+                [(tantivy.Occur.Should, q) for q in queries],
+            )
             words = autocomplete(
                 index,
                 q_str,
