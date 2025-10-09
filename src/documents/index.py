@@ -26,6 +26,7 @@ from guardian.shortcuts import get_users_with_perms
 from whoosh import classify
 from whoosh import query
 from whoosh.highlight import HtmlFormatter
+from whoosh.qparser.dateparse import DateParserPlugin
 from whoosh.qparser.dateparse import English
 from whoosh.util.times import timespan
 
@@ -33,6 +34,7 @@ from documents.models import CustomFieldInstance
 from documents.models import Document
 from documents.models import Note
 from documents.models import User
+from documents.parsers import parse_date
 
 if TYPE_CHECKING:
     from django.db.models import QuerySet
@@ -93,9 +95,14 @@ def get_schema():
     sb.add_text_field("type", stored=True, fast=True, index_option="basic")
     sb.add_integer_field("type_id", stored=True)
     sb.add_boolean_field("has_type", stored=True)
-    sb.add_date_field("created", stored=True, fast=True)  # UNIX timestamp or ISO string
-    sb.add_date_field("modified", stored=True, fast=True)
-    sb.add_date_field("added", stored=True, fast=True)
+    sb.add_date_field(
+        "created",
+        stored=True,
+        indexed=True,
+        fast=True,
+    )  # UNIX timestamp or ISO string
+    sb.add_date_field("modified", stored=True, indexed=True, fast=True)
+    sb.add_date_field("added", stored=True, indexed=True, fast=True)
     sb.add_text_field("path", stored=True, index_option="basic")
     sb.add_integer_field("path_id", stored=True)
     sb.add_boolean_field("has_path", stored=True)
@@ -625,6 +632,117 @@ class LocalDateParser(English):
         return d
 
 
+date_parser_plugin = DateParserPlugin(
+    basedate=django_timezone.now(),
+    dateparser=LocalDateParser(),
+    free=True,
+)
+
+
+def parse_date_expression(expr: str, base_date: datetime | None = None):
+    """
+    Try to interpret a natural-language date expression using Whoosh's English DateParser,
+    and fall back to the Paperless date parsing function if needed.
+
+    Args:
+        expr (str): The user-provided date expression (e.g. "last week", "March 2023", "> yesterday").
+        base_date (datetime, optional): The reference datetime for relative expressions.
+                                        Defaults to current UTC time.
+
+    Returns:
+        tuple[datetime | None, datetime | None]:
+            A (start, end) datetime tuple suitable for Tantivy range syntax.
+            If the expression represents a single day, end = start + 1 day.
+    """
+    # base = base_date or datetime.now(timezone.utc)
+
+    # Strip spaces around >, <, etc.
+    expr = expr.strip()
+
+    # ---- 1. Try Whoosh DateParser ----
+    # parser = LocalDateParser()
+
+    try:
+        # result = parser.date_from(expr, basedate=base)
+        result = date_parser_plugin.dateparser.date_from(expr)
+        if hasattr(result, "start") and hasattr(result, "end"):
+            start, end = result.start, result.end
+        else:
+            start, end = result, result + timedelta(days=1)
+        print("parsed date with Whoosh plugin")
+        return start, end
+    except Exception:
+        pass
+
+    # ---- 2. Fallback to paperless date parsing ----
+    parsed = parse_date(expr, expr)
+    if parsed:
+        print("parsed date with paperless date parsing function")
+        return parsed, parsed + timedelta(days=1)
+    print("Could not parse any date")
+    return None, None
+
+
+def preprocess_query_dates(
+    query: str,
+    date_fields=("created", "modified", "added"),
+) -> str:
+    """
+    Detect and replace natural-language date expressions in a Tantivy-compatible way.
+
+    Supported examples:
+        created:last week
+        modified:>yesterday
+        date:(March 2023 to April 2023)
+        created:<2023-01-01
+
+    Args:
+        query (str): The raw user query string.
+        date_fields (tuple[str]): Field names that should be treated as date fields.
+
+    Returns:
+        str: The query string rewritten with Tantivy-compatible range syntax.
+    """
+
+    def replace_date_expr(match):
+        field, operator, expr = match.groups()
+        field = field.strip()
+        operator = operator or ""
+
+        # Ignore fields that are not declared date fields
+        if field not in date_fields:
+            return match.group(0)
+
+        start, end = parse_date_expression(expr.strip())
+        if not start and not end:
+            print("Start and end were not found")
+            return match.group(0)
+        print(f"start: {start}, end: {end}")
+
+        # Convert operator into range
+        if operator in (">", ">="):
+            return f"{field}:[{start.isoformat()} TO *]"
+        elif operator in ("<", "<="):
+            return f"{field}:[* TO {end.isoformat()}]"
+        elif "to" in expr.lower():  # explicit range
+            return f"{field}:[{start.isoformat()} TO {end.isoformat()}]"
+        else:  # implicit equality
+            return f"{field}:[{start.isoformat()} TO {end.isoformat()}]"
+
+    # Pattern supports: created:last week | date:>2024-01-01 | date:(March 2023 to April 2023)
+    # DATE_QUERY_RE = re.compile(
+    #     r"(?P<field>\w+)\s*:\s*(?P<op>>=|<=|>|<)?\s*\(?\s*(?P<expr>[a-zA-Z0-9\s\-\.:/]+(?:\s+to\s+[a-zA-Z0-9\s\-\.:/]+)?)\)?",
+    #     flags=re.IGNORECASE,
+    # )
+    DATE_QUERY_RE = re.compile(
+        r"(?P<field>\w+)\s*:\s*(?P<op>>=|<=|>|<)?\s*\[?\s*"
+        r"(?P<expr>[^\]]+?)"  # everything until a closing bracket
+        r"\s*\]?",
+        flags=re.IGNORECASE,
+    )
+    return DATE_QUERY_RE.sub(replace_date_expr, query)
+
+
 def rewrite_default_and_keywords(query_string: str) -> str:
     """
     Separate keywords by AND when natural query language isn't detected.
@@ -632,7 +750,7 @@ def rewrite_default_and_keywords(query_string: str) -> str:
     if not any(
         [
             w in query_string
-            for w in ("AND", "OR", "NOT", "TO", "+", "-", "(", ")", '"')
+            for w in ("AND", "OR", "NOT", "TO", "+", "-", "(", ")", '"', ":")
         ],
     ):
         # No natural language detected, so separate by AND
@@ -643,12 +761,16 @@ def rewrite_default_and_keywords(query_string: str) -> str:
 class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         q_str = self.query_params["query"]
-        q_str = rewrite_natural_date_keywords(q_str)
+        # q_str = rewrite_natural_date_keywords(q_str)
+        print(f"raw query: {q_str}")
+        q_str = preprocess_query_dates(q_str)
+        print(f"parsed date query: {q_str}")
         if len(q_str) <= 3:
             fuzzy_search = False
         else:
             fuzzy_search = True
         q_str = rewrite_default_and_keywords(q_str)
+        print(f"with keywords: {q_str}")
 
         # TODO: date parsing plugin like whoosh
         with open_index() as index:
