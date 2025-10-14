@@ -26,6 +26,7 @@ from guardian.shortcuts import get_users_with_perms
 from whoosh import classify
 from whoosh import query
 from whoosh.highlight import HtmlFormatter
+from whoosh.qparser.dateparse import DateParserPlugin
 from whoosh.qparser.dateparse import English
 from whoosh.util.times import timespan
 
@@ -57,9 +58,24 @@ def extract_bigram_content(text: str) -> str:
 
 # In Tantivy, a text analyzer is a pipeline of
 # a tokenizer, optionally followed by filters.
-bigram_analyzer: tantivy.TextAnalyzer = tantivy.TextAnalyzerBuilder(
-    tantivy.Tokenizer.ngram(2, 2),
-).build()
+bigram_analyzer: tantivy.TextAnalyzer = (
+    tantivy.TextAnalyzerBuilder(
+        tantivy.Tokenizer.ngram(2, 2),
+    )
+    .filter(tantivy.Filter.lowercase())
+    .build()
+)
+
+# Remove words longer than 64 characters, make the fields case AND diacritic insensitive
+simple_analyzer: tantivy.TextAnalyzer = (
+    tantivy.TextAnalyzerBuilder(
+        tantivy.Tokenizer.simple(),
+    )
+    .filter(tantivy.Filter.remove_long(65))
+    .filter(tantivy.Filter.lowercase())
+    .filter(tantivy.Filter.ascii_fold())
+    .build()
+)
 
 
 @lru_cache(maxsize=1)
@@ -76,45 +92,53 @@ def get_schema():
     # TODO are all the has_ really needed?
     sb.add_integer_field("id", stored=True, indexed=True)
     sb.add_text_field("title", stored=True, fast=True, index_option="basic")
-    sb.add_text_field("autocomplete_word", stored=True, index_option="basic")
-    sb.add_text_field("content", stored=True)
+    sb.add_text_field(
+        "autocomplete_word",
+        stored=True,
+        index_option="basic",
+        tokenizer_name="default",
+    )
+    sb.add_text_field("content", stored=True, tokenizer_name="simple_analyzer")
     sb.add_text_field(
         "bigram_content",
         tokenizer_name="bigram_analyzer",
         index_option="freq",
     )  # used for languages such as CJK
     sb.add_integer_field("asn", stored=True, fast=True)
-    sb.add_text_field("correspondent", stored=True, fast=True, index_option="basic")
+    sb.add_text_field("correspondent", stored=True, fast=True, tokenizer_name="default")
     sb.add_integer_field("correspondent_id", stored=True)
     sb.add_boolean_field("has_correspondent", stored=True)
-    sb.add_text_field("tag", stored=True, index_option="basic")
+    sb.add_text_field("tag", stored=True, tokenizer_name="simple_analyzer")
     sb.add_integer_field("tag_id", stored=True)
     sb.add_boolean_field("has_tag", stored=True)
-    sb.add_text_field("type", stored=True, fast=True, index_option="basic")
+    sb.add_text_field("type", stored=True, fast=True, tokenizer_name="default")
     sb.add_integer_field("type_id", stored=True)
     sb.add_boolean_field("has_type", stored=True)
-    sb.add_date_field("created", stored=True, fast=True)  # UNIX timestamp or ISO string
-    sb.add_date_field("modified", stored=True, fast=True)
-    sb.add_date_field("added", stored=True, fast=True)
-    sb.add_text_field("path", stored=True, index_option="basic")
+    sb.add_date_field(
+        "created",
+        stored=True,
+        fast=True,
+        indexed=True,
+    )  # Indexed dates must be timezone-naive datetimes
+    sb.add_date_field("modified", stored=True, fast=True, indexed=True)
+    sb.add_date_field("added", stored=True, fast=True, indexed=True)
+    sb.add_text_field("path", stored=True)
     sb.add_integer_field("path_id", stored=True)
     sb.add_boolean_field("has_path", stored=True)
-    sb.add_text_field("notes", stored=True)
+    sb.add_text_field("notes", stored=True, tokenizer_name="simple_analyzer")
     sb.add_integer_field("num_notes", stored=True, fast=True)
-    sb.add_text_field("custom_fields", stored=True, index_option="basic")
+    sb.add_text_field("custom_fields", stored=True, tokenizer_name="simple_analyzer")
     sb.add_integer_field("custom_field_count", stored=True)
-    # sb.add_text_field("custom_fields_id", stored=True)
     sb.add_integer_field("custom_fields_id", stored=True)
     sb.add_boolean_field("has_custom_fields", stored=True)
-    sb.add_text_field("owner", stored=True, fast=True, index_option="basic")
+    sb.add_text_field("owner", stored=True, fast=True)
     sb.add_integer_field("owner_id", stored=True, indexed=True)
     sb.add_boolean_field("has_owner", indexed=True)
     sb.add_integer_field("viewer_id", stored=True, indexed=True)
     sb.add_text_field("checksum", stored=True, index_option="basic")
     sb.add_integer_field("page_count", stored=True, fast=True)
-    sb.add_text_field("original_filename", stored=True, index_option="basic")
-    sb.add_boolean_field("is_shared", stored=True)  # or integer 0/1
-
+    sb.add_text_field("original_filename", stored=True)
+    sb.add_boolean_field("is_shared", stored=True)
     return sb.build()
 
 
@@ -132,6 +156,7 @@ def open_index(*, recreate=False, reload=True):
     try:
         index = tantivy.Index(schema=get_schema(), path=path)
         index.register_tokenizer("bigram_analyzer", bigram_analyzer)
+        index.register_tokenizer("simple_analyzer", simple_analyzer)
     except ValueError as e:
         # Schema has changed
         logger.warning(f"Recreating index due to error: {e}")
@@ -170,6 +195,15 @@ def tokenize_for_autocomplete(text: str) -> list[str]:
     return words
 
 
+def datetime_to_tantivy(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if not isinstance(dt, datetime):
+        raise TypeError(f"Expected datetime, got {type(dt)}")
+    dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
     tags = ",".join([t.name for t in doc.tags.all()])
     tags_ids = [t.id for t in doc.tags.all()]
@@ -201,24 +235,22 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
     writer.delete_documents_by_query(
         tantivy.Query.term_query(get_schema(), "id", doc.pk),
     )
-
     indexed_doc = tantivy.Document(
         id=doc.pk,
-        title=doc.title,
+        title=doc.title or "",
         content=doc.content,
         bigram_content=extract_bigram_content(doc.content),
         correspondent=doc.correspondent.name if doc.correspondent else "",
         correspondent_id=doc.correspondent.id if doc.correspondent else 0,
         has_correspondent=doc.correspondent is not None,
-        # tag=tags if tags else "",
         has_tag=len(tags) > 0,
         type=doc.document_type.name if doc.document_type else "",
         type_id=doc.document_type.id if doc.document_type else 0,
         has_type=doc.document_type is not None,
-        created=datetime.combine(doc.created, time.min).isoformat(),
-        added=doc.added.isoformat(),
+        created=datetime_to_tantivy(datetime.combine(doc.created, time.min)),
+        added=datetime_to_tantivy(doc.added),
         asn=asn or 0,
-        modified=doc.modified.isoformat(),
+        modified=datetime_to_tantivy(doc.modified),
         path=doc.storage_path.name if doc.storage_path else "",
         path_id=doc.storage_path.id if doc.storage_path else 0,
         has_path=doc.storage_path is not None,
@@ -254,7 +286,6 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
             for viewer_id in viewer_ids:
                 indexed_doc.add_integer("viewer_id", viewer_id)
             writer.add_document(indexed_doc)
-            # print(indexed_doc)
     logger.debug(f"Index updated for document {doc.pk}.")
 
 
@@ -625,6 +656,129 @@ class LocalDateParser(English):
         return d
 
 
+date_parser_plugin = DateParserPlugin(
+    basedate=django_timezone.now(),
+    dateparser=LocalDateParser(),
+)
+
+
+def parse_natural_date(expr: str):
+    """
+    Parse une expression de date naturelle en utilisant le parser anglais de Whoosh.
+    Retourne (start, end).
+    """
+
+    result = date_parser_plugin.dateparser.date_from(expr)
+
+    if not result:
+        return (None, None)
+
+    if isinstance(result, timespan):
+        return result.start, result.end
+    else:
+        raise RuntimeError(f"Unexpected result type: {type(result)}")
+
+
+DATE_FIELDS = ["created", "added", "modified"]
+DATE_QUERY_RE = re.compile(
+    r"""
+    (?P<field>\w+)                    # field ex: created
+    \s*:\s*                           # separator ":"
+    (?P<op>>=|<=|>|<)?\s*             # optional operator
+    (                                 #
+        (?P<bracket_expr>             #   if [expr]
+            \[[^\[\]]*\]
+        )
+        |                             #   or
+        (?P<quoted_expr>              #   expr' or "expr"
+            ['"][^'"]*['"]
+        )
+        |                             #   or
+        (?P<bare_expr>                #   simple expression
+            [^\],'\"]+?
+        )
+    )
+    (?=(?:\s+|,)\w+\s*:|$)            # stop at next field, comma or end
+    """,
+    flags=re.IGNORECASE | re.VERBOSE,
+)
+
+
+def replace_date_expr(match, date_fields=DATE_FIELDS):
+    field = match.group("field").strip()
+    operator = match.group("op") or ""
+    expr = (
+        match.group("bracket_expr")
+        or match.group("quoted_expr")
+        or match.group("bare_expr")
+    )
+    expr = expr.strip("[]'\" ").strip()
+
+    # ignore non-date fields
+    if field not in date_fields:
+        return match.group(0)
+
+    # parse date expression
+    try:
+        start, end = parse_natural_date(expr)
+    except Exception as e:
+        print(f"⚠️ parse_natural_date failed for {expr}: {e}")
+        return match.group(0)
+
+    # si parse_natural_date a renvoyé None
+    if not start and not end:
+        return match.group(0)
+
+    # build Tantivy range
+    if operator in (">", ">="):
+        return f"{field}:[{start.isoformat()} TO *]"
+    elif operator in ("<", "<="):
+        return f"{field}:[* TO {end.isoformat()}]"
+    elif "to" in expr.lower():
+        return f"{field}:[{start.isoformat()} TO {end.isoformat()}]"
+    else:
+        return f"{field}:[{start.isoformat()} TO {end.isoformat()}]"
+
+
+# def preprocess_query_dates(query: str) -> str:
+#     # Convert quotes into brackets first
+#     query = re.sub(
+#         r"(\w+)\s*:\s*(['\"])(.+?)\2",
+#         lambda m: f"{m.group(1)}:[{m.group(3)}]",
+#         query,
+#     )
+
+#     # Replace date expressions
+#     return DATE_QUERY_RE.sub(replace_date_expr, query)
+
+
+def preprocess_query_dates(query: str, date_fields=DATE_FIELDS) -> str:
+    """
+    Only convert quoted expressions to [expr] for *date* fields,
+    then replace date expressions by parsed Tantivy ranges.
+    """
+
+    # Build an alternation of the date field names, e.g. "created|added|modified"
+    # Use re.IGNORECASE so fields are matched case-insensitively.
+    field_alternation = "|".join(map(re.escape, date_fields))
+    quoted_for_date_re = re.compile(
+        rf"(?i)\b(?P<field>{field_alternation})\s*:\s*(['\"])(?P<body>.+?)\2",
+    )
+
+    # Replace only quoted date fields: created:"today" -> created:[today]
+    query = quoted_for_date_re.sub(
+        lambda m: f"{m.group('field')}:[{m.group('body')}]",
+        query,
+    )
+
+    # Now run the main DATE_QUERY_RE substitution which will call replace_date_expr
+    # For re.sub with a function that needs extra args, use a lambda capturing date_fields.
+    return DATE_QUERY_RE.sub(
+        lambda m: replace_date_expr(m, date_fields=date_fields),
+        query,
+    )
+
+
 def rewrite_default_and_keywords(query_string: str) -> str:
     """
     Separate keywords by AND when natural query language isn't detected.
@@ -632,7 +786,7 @@ def rewrite_default_and_keywords(query_string: str) -> str:
     if not any(
         [
             w in query_string
-            for w in ("AND", "OR", "NOT", "TO", "+", "-", "(", ")", '"')
+            for w in ("AND", "OR", "NOT", "TO", "+", "-", "(", ")", '"', "[", "]")
         ],
     ):
         # No natural language detected, so separate by AND
@@ -640,20 +794,72 @@ def rewrite_default_and_keywords(query_string: str) -> str:
     return query_string
 
 
+# Known keywords in your search syntax
+KEYWORDS = [
+    "content",
+    "bigram_content",
+    "title",
+    "correspondent",
+    "tag",
+    "type",
+    "notes",
+    "custom_fields",
+    "added",
+    "created",
+    "modified",
+]
+
+
+def normalize_query(query: str) -> str:
+    """The front-end can send date filters after a comma.
+    This fixes this by replacing the comma by a "AND" condition with the rest of the query."""
+    # Split by commas
+    parts = [p.strip() for p in query.split(",") if p.strip()]
+
+    normalized_parts = []
+    free_text_parts = []
+
+    for part in parts:
+        # Check if it starts with a known keyword
+        if any(part.startswith(f"{kw}:") for kw in KEYWORDS):
+            # If we already collected free text, wrap it in parentheses
+            if free_text_parts:
+                normalized_parts.append(f"({' '.join(free_text_parts)})")
+                free_text_parts = []
+            normalized_parts.append(part)
+        else:
+            free_text_parts.append(part)
+
+    # Add remaining free text if any
+    if free_text_parts:
+        normalized_parts.append(f"({' '.join(free_text_parts)})")
+
+    # Join everything with AND
+    return " AND ".join(normalized_parts)
+
+
 class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         q_str = self.query_params["query"]
+        print(f"raw query: {q_str}")
+        q_str = normalize_query(q_str)
+        print(f"normalized query: {q_str}")
         q_str = rewrite_natural_date_keywords(q_str)
+        print(f"with natural date keywords: {q_str}")
         if len(q_str) <= 3:
             fuzzy_search = False
         else:
             fuzzy_search = True
         q_str = rewrite_default_and_keywords(q_str)
+        print(f"with default and keywords: {q_str}")
+        q_str = preprocess_query_dates(q_str)
+        print(f"with dates: {q_str}")
 
         # TODO: date parsing plugin like whoosh
         with open_index() as index:
             queries = list()
-            q = index.parse_query(
+            index.config_reader
+            q = index.parse_query_lenient(
                 q_str,
                 [
                     "content",
@@ -664,13 +870,16 @@ class DelayedFullTextQuery(DelayedQuery):
                     "type",
                     "notes",
                     "custom_fields",
+                    "added",
+                    "created",
+                    "modified",
                 ],
                 field_boosts={"title": 5.0, "content": 0.5},
-            )
+            )[0]
             queries.append(q)
             if fuzzy_search:
                 # An exact match should outweigh a fuzzy one
-                fuzzy_q = index.parse_query(
+                fuzzy_q = index.parse_query_lenient(
                     # fuzzy field: prefix (prefix must match) bool, distance int, transpose_cost_one (2 letters inverted cost 1 instead of 2): bool
                     q_str,
                     [
@@ -682,6 +891,9 @@ class DelayedFullTextQuery(DelayedQuery):
                         "type",
                         "notes",
                         "custom_fields",
+                        "added",
+                        "created",
+                        "modified",
                     ],
                     field_boosts={"title": 3.0, "content": 0.5},
                     fuzzy_fields={
@@ -693,7 +905,7 @@ class DelayedFullTextQuery(DelayedQuery):
                         "notes": (True, 1, True),
                         "custom_fields": (True, 1, True),
                     },
-                )
+                )[0]
                 queries.append(tantivy.Query.boost_query(fuzzy_q, 0.1))
             q = tantivy.Query.boolean_query(
                 [(tantivy.Occur.Should, q) for q in queries],
