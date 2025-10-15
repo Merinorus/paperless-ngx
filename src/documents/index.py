@@ -520,7 +520,7 @@ class DelayedQuery:
         search_result = self.searcher.search(
             q,
             # limit=pagelen+1,
-            limit=10001,  # TODO set limit for performance?
+            limit=1001,  # TODO set limit for performance?
             offset=(pagenum - 1) * pagelen,
             order_by_field=sortedby,
             order=order,
