@@ -583,7 +583,6 @@ class DelayedQuery:
             for idx, hit in enumerate(results, start=1):
                 hit.rank = idx
                 # hit.highlights
-            # print(results)
             # print(4)
             # print(f"__getitem__ took {time.time() - t0:.3f} seconds")
         else:
@@ -779,15 +778,15 @@ def preprocess_query_dates(query: str, date_fields=DATE_FIELDS) -> str:
     )
 
 
+NQL_TOKENS = ["AND", "OR", "NOT", "TO", "+", "-", "(", ")", '"', "[", "]"]
+
+
 def rewrite_default_and_keywords(query_string: str) -> str:
     """
     Separate keywords by AND when natural query language isn't detected.
     """
     if not any(
-        [
-            w in query_string
-            for w in ("AND", "OR", "NOT", "TO", "+", "-", "(", ")", '"', "[", "]")
-        ],
+        [w in query_string for w in NQL_TOKENS],
     ):
         # No natural language detected, so separate by AND
         query_string = re.sub(r"\s+", " AND ", query_string.strip())
@@ -838,23 +837,67 @@ def normalize_query(query: str) -> str:
     return " AND ".join(normalized_parts)
 
 
+FIELD_EXPR_RE = re.compile(
+    r"""
+    (?P<field>\w+)
+    \s*:\s*
+    (?P<value>
+        \[[^\[\]]*\]      # plage entre crochets
+        |
+        [^,\s]+           # ou valeur simple
+    )
+    (?:,|(?=\s|$))        # séparée par virgule ou escape/fin
+    """,
+    re.VERBOSE,
+)
+
+
+def extract_query_parts(query: str):
+    """Extract structured filters (field:value) and remaining free text."""
+    filters = []
+    consumed_spans = []
+
+    for match in FIELD_EXPR_RE.finditer(query):
+        field = match.group("field")
+        value = match.group("value")
+        filters.append((field, value))
+        consumed_spans.append(match.span())
+
+    # Remove all matched segments from the original string
+    free_text = query
+    for start, end in reversed(consumed_spans):
+        free_text = free_text[:start] + " " + free_text[end:]
+
+    # Normalize free text
+    text_terms = [
+        t
+        for t in re.findall(r"\w+(?:['’]\w+)?", free_text)
+        if t and t not in NQL_TOKENS
+    ]
+
+    return {"filters": filters, "text_terms": text_terms}
+
+
 class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         q_str = self.query_params["query"]
         print(f"raw query: {q_str}")
+
         q_str = normalize_query(q_str)
         print(f"normalized query: {q_str}")
         q_str = rewrite_natural_date_keywords(q_str)
         print(f"with natural date keywords: {q_str}")
-        if len(q_str) <= 3:
-            fuzzy_search = False
-        else:
-            fuzzy_search = True
+
         q_str = rewrite_default_and_keywords(q_str)
         print(f"with default and keywords: {q_str}")
         q_str = preprocess_query_dates(q_str)
         print(f"with dates: {q_str}")
-
+        text_terms = extract_query_parts(q_str)["text_terms"]
+        print(f"text terms: {text_terms}")
+        if any([len(t) >= 4 for t in text_terms]):
+            fuzzy_search = True
+        else:
+            fuzzy_search = False
         # TODO: date parsing plugin like whoosh
         with open_index() as index:
             queries = list()
@@ -907,6 +950,7 @@ class DelayedFullTextQuery(DelayedQuery):
                     },
                 )[0]
                 queries.append(tantivy.Query.boost_query(fuzzy_q, 0.1))
+
             q = tantivy.Query.boolean_query(
                 [(tantivy.Occur.Should, q) for q in queries],
             )
