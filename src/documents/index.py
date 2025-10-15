@@ -23,8 +23,6 @@ from django.utils import timezone as django_timezone
 from django.utils.timezone import get_current_timezone
 from django.utils.timezone import now
 from guardian.shortcuts import get_users_with_perms
-from whoosh import classify
-from whoosh import query
 from whoosh.highlight import HtmlFormatter
 from whoosh.qparser.dateparse import DateParserPlugin
 from whoosh.qparser.dateparse import English
@@ -90,6 +88,7 @@ def get_schema():
     """
     sb = tantivy.SchemaBuilder()
     # TODO are all the has_ really needed?
+    sb.add_boolean_field("is_paperless_document", indexed=True)
     sb.add_integer_field("id", stored=True, indexed=True)
     sb.add_text_field("title", stored=True, fast=True, index_option="basic")
     sb.add_text_field(
@@ -236,6 +235,7 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
         tantivy.Query.term_query(get_schema(), "id", doc.pk),
     )
     indexed_doc = tantivy.Document(
+        is_paperless_document=True,
         id=doc.pk,
         title=doc.title or "",
         content=doc.content,
@@ -279,6 +279,7 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
         if word not in added_words:
             added_words.add(word)
             indexed_doc = tantivy.Document(
+                is_paperless_document=False,
                 id=doc.pk,
                 autocomplete_word=word,
                 owner_id=int(doc.owner.id if doc.owner and doc.owner.id else 0),
@@ -509,7 +510,10 @@ class DelayedQuery:
 
         q, mask, suggested_correction = self._get_query()
         self.suggested_correction = suggested_correction
-        sortedby, reverse = self._get_query_sortedby()
+        if isinstance(self, DelayedMoreLikeThisQuery):
+            sortedby, reverse = None, None
+        else:
+            sortedby, reverse = self._get_query_sortedby()
         order = tantivy.Order.Desc if reverse else tantivy.Order.Asc
         pagenum = math.floor(item.start / self.page_size) + 1
         # print(f"pagenum: {pagenum}")
@@ -950,9 +954,14 @@ class DelayedFullTextQuery(DelayedQuery):
                     },
                 )[0]
                 queries.append(tantivy.Query.boost_query(fuzzy_q, 0.1))
-
+            is_document_q = tantivy.Query.term_query(
+                get_schema(),
+                "is_paperless_document",
+                True,
+            )
             q = tantivy.Query.boolean_query(
-                [(tantivy.Occur.Should, q) for q in queries],
+                [(tantivy.Occur.Should, q) for q in queries]
+                + [(tantivy.Occur.Must, is_document_q)],
             )
             words = autocomplete(
                 index,
@@ -969,21 +978,29 @@ class DelayedFullTextQuery(DelayedQuery):
 class DelayedMoreLikeThisQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         more_like_doc_id = int(self.query_params["more_like_id"])
-        content = Document.objects.get(id=more_like_doc_id).content
+        is_doc_q = tantivy.Query.term_query(get_schema(), "is_paperless_document", True)
+        doc_id_q = tantivy.Query.term_query(get_schema(), "id", more_like_doc_id)
 
-        docnum = self.searcher.document_number(id=more_like_doc_id)
-        # TODO: not supported in tantivy?
-        kts = self.searcher.key_terms_from_text(
-            "content",
-            content,
-            numterms=20,
-            model=classify.Bo1Model,
-            normalize=False,
+        # Fetch the current doc's address
+        current_doc_q = tantivy.Query.boolean_query(
+            [(tantivy.Occur.Must, doc_id_q), (tantivy.Occur.Must, is_doc_q)],
         )
-        q = query.Or(
-            [query.Term("content", word, boost=weight) for word, weight in kts],
+        doc_address: tantivy.DocAddress = self.searcher.search(
+            current_doc_q,
+            limit=1,
+        ).hits[0][1]
+
+        # Exclude the current doc for "more like this" search results
+        more_like_this_q = tantivy.Query.more_like_this_query(doc_address)
+        q = tantivy.Query.boolean_query(
+            [
+                (tantivy.Occur.Must, more_like_this_q),
+                (tantivy.Occur.Must, is_doc_q),
+                (tantivy.Occur.MustNot, doc_id_q),
+            ],
         )
-        mask: set = {docnum}
+
+        mask = None  # TODO?
 
         return q, mask, None
 
