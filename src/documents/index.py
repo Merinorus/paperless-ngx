@@ -509,6 +509,7 @@ class DelayedQuery:
             return page
 
         q, mask, suggested_correction = self._get_query()
+        print(q)
         self.suggested_correction = suggested_correction
         if isinstance(self, DelayedMoreLikeThisQuery):
             sortedby, reverse = None, None
@@ -905,7 +906,6 @@ class DelayedFullTextQuery(DelayedQuery):
         # TODO: date parsing plugin like whoosh
         with open_index() as index:
             queries = list()
-            index.config_reader
             q = index.parse_query_lenient(
                 q_str,
                 [
@@ -960,8 +960,15 @@ class DelayedFullTextQuery(DelayedQuery):
                 True,
             )
             q = tantivy.Query.boolean_query(
-                [(tantivy.Occur.Should, q) for q in queries]
-                + [(tantivy.Occur.Must, is_document_q)],
+                [
+                    (tantivy.Occur.Must, is_document_q),
+                    (
+                        tantivy.Occur.Must,
+                        tantivy.Query.boolean_query(
+                            [(tantivy.Occur.Should, q) for q in queries],
+                        ),
+                    ),
+                ],
             )
             words = autocomplete(
                 index,
