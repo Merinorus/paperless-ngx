@@ -42,6 +42,8 @@ index_dir = f"{settings.INDEX_DIR}_tantivy"
 
 CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+")
 
+MAX_RESULT_LIMIT = 1001
+
 
 def extract_bigram_content(text: str) -> str:
     """
@@ -511,11 +513,46 @@ class DelayedQuery:
         q, mask, suggested_correction = self._get_query()
         print(q)
         self.suggested_correction = suggested_correction
-        if isinstance(self, DelayedMoreLikeThisQuery):
-            sortedby, reverse = None, None
-        else:
-            sortedby, reverse = self._get_query_sortedby()
+
+        sortedby, reverse = self._get_query_sortedby()
         order = tantivy.Order.Desc if reverse else tantivy.Order.Asc
+        if isinstance(self, DelayedMoreLikeThisQuery) and sortedby not in [
+            "score",
+            None,
+        ]:
+            # Special case: "more like this" query doesn't support sort and order
+            # So we fetch the IDs of the corresponding items,
+            # then query by theirs IDs to be able to sort them.
+            search_result = self.searcher.search(
+                q,
+                limit=MAX_RESULT_LIMIT,  # TODO set limit for performance?
+            ).hits
+            more_like_this_ids = list()
+            for _, doc_addr in search_result:
+                doc = self.searcher.doc(doc_addr)
+                doc_id = doc["id"][0]
+                more_like_this_ids.append(doc_id)
+            q = tantivy.Query.boolean_query(
+                [
+                    (
+                        tantivy.Occur.Must,
+                        tantivy.Query.term_set_query(
+                            get_schema(),
+                            "id",
+                            more_like_this_ids,
+                        ),
+                    ),
+                    (
+                        tantivy.Occur.Must,
+                        tantivy.Query.term_query(
+                            get_schema(),
+                            "is_paperless_document",
+                            True,
+                        ),
+                    ),
+                ],
+            )
+
         pagenum = math.floor(item.start / self.page_size) + 1
         # print(f"pagenum: {pagenum}")
         pagelen = self.page_size
@@ -525,7 +562,7 @@ class DelayedQuery:
         search_result = self.searcher.search(
             q,
             # limit=pagelen+1,
-            limit=1001,  # TODO set limit for performance?
+            limit=MAX_RESULT_LIMIT,  # TODO set limit for performance?
             offset=(pagenum - 1) * pagelen,
             order_by_field=sortedby,
             order=order,
