@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import re
+import threading
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime
@@ -168,10 +169,89 @@ def open_index(*, recreate=False, reload=True):
     yield index
 
 
+class AsyncWriter(threading.Thread):
+    LOCK_EXC_MSG = "Failed to acquire Lockfile"
+
+    def __init__(self, index, delay=0.25, **writerargs):
+        """
+        Asynchronous writer for tantivy, inspired from Whoosh's AsyncWriter.
+
+        :param index: the :class:`whoosh.index.Index` to write to.
+        :param delay: the delay (in seconds) between attempts to instantiate
+            the actual writer.
+        :param writerargs: an optional dictionary specifying keyword arguments
+            to to be passed to the index's ``writer()`` method.
+        """
+        threading.Thread.__init__(self)
+        self.running = False
+        self.index = index
+        self.writerargs = writerargs or {}
+        self.delay = delay
+        self.events = []
+        try:
+            self.writer = self.index.writer(**self.writerargs)
+        except ValueError as e:
+            if self.LOCK_EXC_MSG in str(e):
+                self.writer = None
+            else:
+                raise
+
+    def _record(self, method, *args, **kwargs):
+        if self.writer:
+            getattr(self.writer, method)(*args, **kwargs)
+        else:
+            self.events.append((method, args, kwargs))
+
+    def run(self):
+        self.running = True
+        writer = self.writer
+        while writer is None:
+            try:
+                writer = self.index.writer(**self.writerargs)
+            except ValueError as e:
+                if self.LOCK_EXC_MSG in str(e):
+                    import time as stime
+
+                    stime.sleep(self.delay)
+                else:
+                    raise
+        for method, args, kwargs in self.events:
+            getattr(writer, method)(*args, **kwargs)
+        writer.commit(*self.commitargs, **self.commitkwargs)
+
+    def delete_documents_by_query(self, *args, **kwargs):
+        self._record("delete_documents_by_query", *args, **kwargs)
+
+    def add_document(self, *args, **kwargs):
+        self._record("add_document", *args, **kwargs)
+
+    def commit(self, *args, **kwargs):
+        if self.writer:
+            self.writer.commit(*args, **kwargs)
+        else:
+            self.commitargs, self.commitkwargs = args, kwargs
+            self.start()
+
+    def wait_merging_threads(self, *args, **kwargs):
+        if self.writer:
+            return self.writer.wait_merging_threads(*args, **kwargs)
+        # If commit was deferred and thread started, join it
+        if self.is_alive():
+            self.join()
+
+    def rollback(self, *args, **kwargs):
+        if self.writer:
+            return self.writer.rollback(*args, **kwargs)
+        # If we never acquired the writer, drop buffered events
+        self.events.clear()
+        # If a background thread is running, we can't reliably abort tantivy's writer
+        # but dropping events is the best effort here.
+
+
 @contextmanager
 def open_index_writer(reload=True, **kwargs):
     with open_index(reload=reload) as index:
-        writer = index.writer(num_threads=os.cpu_count() or 0)
+        writer = AsyncWriter(index, num_threads=os.cpu_count() or 0)
         try:
             yield writer
         except Exception as e:
