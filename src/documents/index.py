@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import logging
 import math
 import os
@@ -42,6 +43,7 @@ logger = logging.getLogger("paperless.index")
 index_dir = f"{settings.INDEX_DIR}_tantivy"
 
 CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+")
+WORD_RE = re.compile(r"\w+")
 
 MAX_RESULT_LIMIT = 1001
 
@@ -91,7 +93,6 @@ def get_schema():
     """
     sb = tantivy.SchemaBuilder()
     # TODO are all the has_ really needed?
-    sb.add_boolean_field("is_paperless_document", indexed=True)
     sb.add_integer_field("id", stored=True, indexed=True)
     sb.add_text_field("title", stored=True, fast=True, index_option="basic")
     sb.add_text_field(
@@ -99,7 +100,7 @@ def get_schema():
         stored=True,
         index_option="basic",
         tokenizer_name="default",
-    )
+    )  # Alphabetically sorted list
     sb.add_text_field("content", stored=True, tokenizer_name="simple_analyzer")
     sb.add_text_field(
         "bigram_content",
@@ -269,11 +270,10 @@ def open_index_searcher():
         yield index.searcher()
 
 
-def tokenize_for_autocomplete(text: str) -> list[str]:
-    # Lowercase, split on non-word characters
-    # Matches Tantivy’s default behavior for text fields
-    words = re.findall(r"\b\w+\b", text.lower())
-    return words
+def tokenize_for_autocomplete(text: str):
+    """Return all distinct autocomplete words from a given text."""
+    text = text.lower()
+    return {m.group(0) for m in WORD_RE.finditer(text)}
 
 
 def datetime_to_tantivy(dt: datetime | None) -> datetime | None:
@@ -317,7 +317,6 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
         tantivy.Query.term_query(get_schema(), "id", doc.pk),
     )
     indexed_doc = tantivy.Document(
-        is_paperless_document=True,
         id=doc.pk,
         title=doc.title or "",
         content=doc.content,
@@ -355,20 +354,11 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
         indexed_doc.add_integer("custom_fields_id", custom_fields_id)
     for viewer_id in viewer_ids:
         indexed_doc.add_integer("viewer_id", viewer_id)
+
+    autocomplete_words = sorted(tokenize_for_autocomplete(doc.content))
+    for word in autocomplete_words:
+        indexed_doc.add_text("autocomplete_word", word)
     writer.add_document(indexed_doc)
-    added_words = set()
-    for word in tokenize_for_autocomplete(doc.content):
-        if word not in added_words:
-            added_words.add(word)
-            indexed_doc = tantivy.Document(
-                is_paperless_document=False,
-                id=doc.pk,
-                autocomplete_word=word,
-                owner_id=int(doc.owner.id if doc.owner and doc.owner.id else 0),
-            )
-            for viewer_id in viewer_ids:
-                indexed_doc.add_integer("viewer_id", viewer_id)
-            writer.add_document(indexed_doc)
     logger.debug(f"Index updated for document {doc.pk}.")
 
 
@@ -612,25 +602,10 @@ class DelayedQuery:
                 doc = self.searcher.doc(doc_addr)
                 doc_id = doc["id"][0]
                 more_like_this_ids.append(doc_id)
-            q = tantivy.Query.boolean_query(
-                [
-                    (
-                        tantivy.Occur.Must,
-                        tantivy.Query.term_set_query(
-                            get_schema(),
-                            "id",
-                            more_like_this_ids,
-                        ),
-                    ),
-                    (
-                        tantivy.Occur.Must,
-                        tantivy.Query.term_query(
-                            get_schema(),
-                            "is_paperless_document",
-                            True,
-                        ),
-                    ),
-                ],
+            q = tantivy.Query.term_set_query(
+                get_schema(),
+                "id",
+                more_like_this_ids,
             )
 
         pagenum = math.floor(item.start / self.page_size) + 1
@@ -1071,21 +1046,8 @@ class DelayedFullTextQuery(DelayedQuery):
                     },
                 )[0]
                 queries.append(tantivy.Query.boost_query(fuzzy_q, 0.1))
-            is_document_q = tantivy.Query.term_query(
-                get_schema(),
-                "is_paperless_document",
-                True,
-            )
             q = tantivy.Query.boolean_query(
-                [
-                    (tantivy.Occur.Must, is_document_q),
-                    (
-                        tantivy.Occur.Must,
-                        tantivy.Query.boolean_query(
-                            [(tantivy.Occur.Should, q) for q in queries],
-                        ),
-                    ),
-                ],
+                [(tantivy.Occur.Should, q) for q in queries],
             )
             words = autocomplete(
                 index,
@@ -1102,13 +1064,10 @@ class DelayedFullTextQuery(DelayedQuery):
 class DelayedMoreLikeThisQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         more_like_doc_id = int(self.query_params["more_like_id"])
-        is_doc_q = tantivy.Query.term_query(get_schema(), "is_paperless_document", True)
-        doc_id_q = tantivy.Query.term_query(get_schema(), "id", more_like_doc_id)
 
         # Fetch the current doc's address
-        current_doc_q = tantivy.Query.boolean_query(
-            [(tantivy.Occur.Must, doc_id_q), (tantivy.Occur.Must, is_doc_q)],
-        )
+        current_doc_q = tantivy.Query.term_query(get_schema(), "id", more_like_doc_id)
+
         doc_address: tantivy.DocAddress = self.searcher.search(
             current_doc_q,
             limit=1,
@@ -1119,14 +1078,29 @@ class DelayedMoreLikeThisQuery(DelayedQuery):
         q = tantivy.Query.boolean_query(
             [
                 (tantivy.Occur.Must, more_like_this_q),
-                (tantivy.Occur.Must, is_doc_q),
-                (tantivy.Occur.MustNot, doc_id_q),
+                (tantivy.Occur.MustNot, current_doc_q),
             ],
         )
 
         mask = None  # TODO?
 
         return q, mask, None
+
+
+def prefix_view(sorted_words: list[str], prefix: str):
+    """Return an iterator over words starting with prefix from a given list of sorted words."""
+    prefix = prefix.lower()
+    start_idx = bisect.bisect_left(sorted_words, prefix)
+
+    # iterate forward lazily, stop when prefix no longer matches
+    def generator():
+        for i in range(start_idx, len(sorted_words)):
+            word = sorted_words[i]
+            if not word.startswith(prefix):
+                break
+            yield word
+
+    return generator()
 
 
 def autocomplete(
@@ -1199,16 +1173,23 @@ def autocomplete(
             hits = searcher.search(prefix_q, limit=remaining_limit * 5).hits
             if not hits:
                 return result
-
+            content_snippet_generator = tantivy.SnippetGenerator.create(
+                searcher,
+                prefix_q,
+                get_schema(),
+                "autocomplete_word",
+            )
+            content_snippet_generator.set_max_num_chars(100)
             for _, addr in hits:
                 doc = searcher.doc(addr)
-                word = doc["autocomplete_word"][0].lower()
-                if word in seen:
-                    continue
-                seen.add(word)
-                result.append(word)
-                if len(result) >= limit:
-                    break
+                all_words = doc["autocomplete_word"]
+                for word in prefix_view(all_words, term):
+                    if word in seen:
+                        continue
+                    seen.add(word)
+                    result.append(word)
+                    if len(result) >= limit:
+                        return result
         return result
 
 
