@@ -44,7 +44,7 @@ logger = logging.getLogger("paperless.index")
 index_dir = f"{settings.INDEX_DIR}_tantivy"
 
 CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+")
-WORD_RE = re.compile(r"\w+")
+WORD_RE = re.compile(r"\w+", flags=re.IGNORECASE)
 
 MAX_RESULT_LIMIT = 1001
 
@@ -273,8 +273,7 @@ def open_index_searcher():
 
 def tokenize_for_autocomplete(text: str):
     """Return all distinct autocomplete words from a given text."""
-    text = text.lower()
-    return {m.group(0) for m in WORD_RE.finditer(text)}
+    return {m.group(0).lower() for m in WORD_RE.finditer(text)}
 
 
 def datetime_to_tantivy(dt: datetime | None) -> datetime | None:
@@ -356,8 +355,15 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
     for viewer_id in viewer_ids:
         indexed_doc.add_integer("viewer_id", viewer_id)
 
-    autocomplete_words = sorted(tokenize_for_autocomplete(doc.content))
-    for word in autocomplete_words:
+    autocomplete_words = tokenize_for_autocomplete(doc.content)
+
+    # Add also title and note content for autocomplete
+    autocomplete_words.update(tokenize_for_autocomplete(doc.title))
+    autocomplete_words.update(tokenize_for_autocomplete(notes))
+
+    # Make sure to sort the autocomplete word lists.
+    # We assume it's sorted for autocomplete search function.
+    for word in sorted(autocomplete_words):
         indexed_doc.add_text("autocomplete_word", word)
     writer.add_document(indexed_doc)
     logger.debug(f"Index updated for document {doc.pk}.")
