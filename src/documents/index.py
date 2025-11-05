@@ -6,6 +6,7 @@ import math
 import os
 import re
 import threading
+import unicodedata
 from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime
@@ -99,7 +100,7 @@ def get_schema():
         "autocomplete_word",
         stored=True,
         index_option="basic",
-        tokenizer_name="default",
+        tokenizer_name="simple_analyzer",
     )  # Alphabetically sorted list
     sb.add_text_field("content", stored=True, tokenizer_name="simple_analyzer")
     sb.add_text_field(
@@ -1087,16 +1088,24 @@ class DelayedMoreLikeThisQuery(DelayedQuery):
         return q, mask, None
 
 
+def _normalize(text: str) -> str:
+    # Decompose characters (NFKD) and remove diacritics
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
+    ).lower()
+
+
 def prefix_view(sorted_words: list[str], prefix: str):
     """Return an iterator over words starting with prefix from a given list of sorted words."""
-    prefix = prefix.lower()
+
+    prefix = _normalize(prefix)
     start_idx = bisect.bisect_left(sorted_words, prefix)
 
     # iterate forward lazily, stop when prefix no longer matches
     def generator():
         for i in range(start_idx, len(sorted_words)):
             word = sorted_words[i]
-            if not word.startswith(prefix):
+            if not _normalize(word).startswith(prefix):
                 break
             yield word
 
@@ -1110,14 +1119,25 @@ def autocomplete(
     user: User | None = None,
     fuzzy_search=False,
 ) -> list[str]:
+    """
+    Returns a list of autocomplete suggestions for the given term.
+    Caveat: documents are searched by Tantivy TF-IDF score,
+    but for each document found, all prefixes in this document are added to the list.
+    So only the first prefix is guaranteed to have the highest score.
+    """
     with open_index() as index:
         result: list[str] = list()
         searcher = index.searcher()
         schema = index.schema
         perm_q = get_permissions_query(user, schema)
+        normalized_term = _normalize(term)
 
         # Find the exact match first
-        exact_subquery = tantivy.Query.term_query(schema, "autocomplete_word", term)
+        exact_subquery = tantivy.Query.term_query(
+            schema,
+            "autocomplete_word",
+            normalized_term,
+        )
         exact_q = tantivy.Query.boolean_query(
             [
                 (tantivy.Occur.Must, exact_subquery),
@@ -1135,7 +1155,7 @@ def autocomplete(
                 prefix_subquery = tantivy.Query.fuzzy_term_query(
                     schema,
                     "autocomplete_word",
-                    term,
+                    normalized_term,
                     1,
                     True,
                     True,
@@ -1144,7 +1164,7 @@ def autocomplete(
                 prefix_subquery = tantivy.Query.regex_query(
                     schema,
                     "autocomplete_word",
-                    f"{term}.*",
+                    f"{normalized_term}.*",
                 )
         except ValueError as e:
             # Autocomplete doesn't support special terms, e.g. parentheses, +, - etc.
@@ -1173,23 +1193,20 @@ def autocomplete(
             hits = searcher.search(prefix_q, limit=remaining_limit * 5).hits
             if not hits:
                 return result
-            content_snippet_generator = tantivy.SnippetGenerator.create(
-                searcher,
-                prefix_q,
-                get_schema(),
-                "autocomplete_word",
-            )
-            content_snippet_generator.set_max_num_chars(100)
+            found_new_word = False
             for _, addr in hits:
                 doc = searcher.doc(addr)
                 all_words = doc["autocomplete_word"]
-                for word in prefix_view(all_words, term):
+                for word in prefix_view(all_words, normalized_term):
                     if word in seen:
                         continue
                     seen.add(word)
+                    found_new_word = True
                     result.append(word)
                     if len(result) >= limit:
                         return result
+            if not found_new_word:
+                return result
         return result
 
 
