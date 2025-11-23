@@ -342,7 +342,7 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
         has_custom_fields=len(custom_fields) > 0,
         owner=doc.owner.username if doc.owner else "",
         owner_id=int(doc.owner.id if doc.owner and doc.owner.id else 0),
-        has_owner=doc.owner and doc.owner.id is not None,
+        has_owner=bool(doc.owner and doc.owner.id is not None),
         checksum=doc.checksum or "",
         page_count=doc.page_count or 0,
         original_filename=doc.original_filename,
