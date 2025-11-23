@@ -19,8 +19,8 @@ from shutil import rmtree
 from typing import TYPE_CHECKING
 from typing import Literal
 
-from dateutil.relativedelta import relativedelta
 import tantivy
+from dateutil.relativedelta import relativedelta
 from django.conf import settings
 from django.utils import timezone as django_timezone
 from django.utils.timezone import get_current_timezone
@@ -545,6 +545,11 @@ class DelayedQuery:
         else:
             return sort_fields_map[field], reverse
 
+    def _manual_sort_requested(self):
+        # See https://github.com/paperless-ngx/paperless-ngx/pull/11383
+        # Tantivy implementation was done before this PR. Needs to implement.
+        return False
+
     def __init__(
         self,
         searcher: tantivy.Searcher,
@@ -569,7 +574,6 @@ class DelayedQuery:
 
         page = self[0:1]
         return len(page)
-
 
     def __getitem__(self, item: slice):
         import time
