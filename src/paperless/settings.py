@@ -763,6 +763,7 @@ if os.getenv("PAPERLESS_DBENGINE") == "mariadb":
 
 DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
 
+TANTIVY_FAST_MODE = __get_boolean("PAPERLESS_TANTIVY_FAST_MODE", False)
 ###############################################################################
 # Internationalization                                                        #
 ###############################################################################

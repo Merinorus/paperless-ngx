@@ -1002,7 +1002,7 @@ class DelayedFullTextQuery(DelayedQuery):
         print(f"with dates: {q_str}")
         text_terms = extract_query_parts(q_str)["text_terms"]
         print(f"text terms: {text_terms}")
-        if any([len(t) >= 4 for t in text_terms]):
+        if not settings.TANTIVY_FAST_MODE and any([len(t) >= 4 for t in text_terms]):
             fuzzy_search = True
         else:
             fuzzy_search = False
