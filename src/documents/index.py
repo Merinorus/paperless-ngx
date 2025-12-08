@@ -31,9 +31,7 @@ from whoosh.qparser.dateparse import DateParserPlugin
 from whoosh.qparser.dateparse import English
 from whoosh.util.times import timespan
 
-from documents.models import CustomFieldInstance
 from documents.models import Document
-from documents.models import Note
 from documents.models import User
 
 if TYPE_CHECKING:
@@ -282,15 +280,13 @@ def datetime_to_tantivy(dt: datetime | None) -> datetime | None:
 
 
 def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
-    tags = ",".join([t.name for t in doc.tags.all()])
-    tags_ids = [t.id for t in doc.tags.all()]
-    notes = ",".join([str(c.note) for c in Note.objects.filter(document=doc)])
-    custom_fields = ",".join(
-        [str(c) for c in CustomFieldInstance.objects.filter(document=doc)],
-    )
-    custom_fields_ids = [
-        f.field.id for f in CustomFieldInstance.objects.filter(document=doc)
-    ]
+    tag_list = list(doc.tags.all())
+    tags = ",".join([t.name for t in tag_list])
+    tags_ids = [t.id for t in tag_list]
+    notes = ",".join([str(n.note) for n in doc.notes.all()])
+    custom_field_list = list(doc.custom_fields.all())
+    custom_fields = ",".join([str(c) for c in custom_field_list])
+    custom_fields_ids = [f.field.id for f in custom_field_list]
     asn: int | None = doc.archive_serial_number
     if asn is not None and (
         asn < Document.ARCHIVE_SERIAL_NUMBER_MIN
@@ -334,7 +330,7 @@ def update_document(writer: tantivy.IndexWriter, doc: Document) -> None:
         notes=notes or "",
         num_notes=len(notes),
         custom_fields=custom_fields or "",
-        custom_field_count=len(doc.custom_fields.all()),
+        custom_field_count=len(custom_field_list),
         has_custom_fields=len(custom_fields) > 0,
         owner=doc.owner.username if doc.owner else "",
         owner_id=int(doc.owner.id if doc.owner and doc.owner.id else 0),
