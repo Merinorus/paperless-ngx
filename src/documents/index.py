@@ -174,7 +174,7 @@ def open_index(*, recreate=False, reload=True):
 class AsyncWriter(threading.Thread):
     LOCK_EXC_MSG = "Failed to acquire Lockfile"
 
-    def __init__(self, index, delay=0.25, **writerargs):
+    def __init__(self, index: tantivy.Index, delay=0.25, **writerargs):
         """
         Asynchronous writer for tantivy, inspired from Whoosh's AsyncWriter.
 
@@ -220,6 +220,7 @@ class AsyncWriter(threading.Thread):
         for method, args, kwargs in self.events:
             getattr(writer, method)(*args, **kwargs)
         writer.commit(*self.commitargs, **self.commitkwargs)
+        writer.wait_merging_threads()
 
     def delete_documents_by_query(self, *args, **kwargs):
         self._record("delete_documents_by_query", *args, **kwargs)
@@ -227,17 +228,13 @@ class AsyncWriter(threading.Thread):
     def add_document(self, *args, **kwargs):
         self._record("add_document", *args, **kwargs)
 
-    def commit(self, *args, **kwargs):
+    def commit_and_wait_merging_threads(self, *args, **kwargs):
         if self.writer:
             self.writer.commit(*args, **kwargs)
+            self.writer.wait_merging_threads()
         else:
             self.commitargs, self.commitkwargs = args, kwargs
             self.start()
-
-    def wait_merging_threads(self, *args, **kwargs):
-        if self.writer:
-            return self.writer.wait_merging_threads(*args, **kwargs)
-        # If commit was deferred and thread started, join it
         if self.is_alive():
             self.join()
 
@@ -260,8 +257,7 @@ def open_index_writer(reload=True, **kwargs):
             logger.exception(str(e))
             writer.rollback()
         finally:
-            writer.commit()
-            writer.wait_merging_threads()
+            writer.commit_and_wait_merging_threads()
 
 
 @contextmanager
