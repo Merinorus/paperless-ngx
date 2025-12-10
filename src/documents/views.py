@@ -2972,7 +2972,7 @@ class SystemStatusView(PassUserMixin):
 
         media_stats = os.statvfs(settings.MEDIA_ROOT)
 
-        redis_url = settings._CHANNELS_REDIS_URL
+        redis_url = settings.CHANNEL_LAYERS["default"]["CONFIG"]["hosts"][0]
         redis_url_parsed = urlparse(redis_url)
         redis_constructed_url = f"{redis_url_parsed.scheme}://{redis_url_parsed.path or redis_url_parsed.hostname}"
         if redis_url_parsed.hostname is not None:
