@@ -162,7 +162,9 @@ class TitleContentFilter(Filter):
     def filter(self, qs, value):
         value = value.strip() if isinstance(value, str) else value
         if value:
-            return qs.filter(Q(title__icontains=value) | Q(content__icontains=value))
+            return qs.filter(
+                Q(title__fticontains=value) | Q(content__fticontains=value),
+            )
         else:
             return qs
 
