@@ -44,9 +44,7 @@ from whoosh.scoring import TF_IDF
 from whoosh.util.times import timespan
 from whoosh.writing import AsyncWriter
 
-from documents.models import CustomFieldInstance
 from documents.models import Document
-from documents.models import Note
 from documents.models import User
 
 if TYPE_CHECKING:
@@ -135,15 +133,13 @@ def open_index_searcher() -> Searcher:
 
 
 def update_document(writer: AsyncWriter, doc: Document) -> None:
-    tags = ",".join([t.name for t in doc.tags.all()])
-    tags_ids = ",".join([str(t.id) for t in doc.tags.all()])
-    notes = ",".join([str(c.note) for c in Note.objects.filter(document=doc)])
-    custom_fields = ",".join(
-        [str(c) for c in CustomFieldInstance.objects.filter(document=doc)],
-    )
-    custom_fields_ids = ",".join(
-        [str(f.field.id) for f in CustomFieldInstance.objects.filter(document=doc)],
-    )
+    tag_list = list(doc.tags.all())
+    tags = ",".join([t.name for t in tag_list])
+    tags_ids = ",".join([str(t.id) for t in tag_list])
+    notes = ",".join([str(c.note) for c in doc.notes.all()])
+    custom_field_list = list(doc.custom_fields.all())
+    custom_fields = ",".join([str(c) for c in custom_field_list])
+    custom_fields_ids = [str(f.field.id) for f in custom_field_list]
     asn: int | None = doc.archive_serial_number
     if asn is not None and (
         asn < Document.ARCHIVE_SERIAL_NUMBER_MIN
@@ -184,7 +180,7 @@ def update_document(writer: AsyncWriter, doc: Document) -> None:
         notes=notes,
         num_notes=len(notes),
         custom_fields=custom_fields,
-        custom_field_count=len(doc.custom_fields.all()),
+        custom_field_count=len(custom_field_list),
         has_custom_fields=len(custom_fields) > 0,
         custom_fields_id=custom_fields_ids if custom_fields_ids else None,
         owner=doc.owner.username if doc.owner else None,
