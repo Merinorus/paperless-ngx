@@ -18,6 +18,7 @@ from django.db.models import prefetch_related_objects
 from django.db.models.signals import post_save
 from django.utils import timezone
 from filelock import FileLock
+from whoosh.util import fib
 from whoosh.writing import AsyncWriter
 
 from documents import index
@@ -65,15 +66,35 @@ logger = logging.getLogger("paperless.tasks")
 def index_optimize():
     ix = index.open_index()
     writer = AsyncWriter(ix)
-    writer.commit(optimize=True)
+    # Let Whoosh determine the optimal segment size.
+    # Using optimize=True could hang or crash with large indexes.
+    writer.commit()
 
 
-def index_reindex(*, progress_bar_disable=False):
-    ix = index.open_index(recreate=True)
+def _compute_optimal_chunk_size(
+    total_docs: int,
+    min_chunk: int = 1000,
+    max_chunk: int = 50000,
+) -> int:
+    """
+    Compute optimal chunk size based on Whoosh's MERGE_SMALL policy.
 
-    total = Document.objects.count()
-    chunk_size = 1000  # Load docs from DB in RAM by chunks
+    MERGE_SMALL merges segments when: i > 3 AND total_docs < fib(i+5)
+    This finds the segment count where merging stops, then divides total_docs
+    by that to get optimal chunk size. Using merge=False with this chunk size
+    creates the optimal number of segments without merge overhead.
+    """
+    # Find optimal segment count (where MERGE_SMALL would stop merging)
+    for num_segments in range(4, 100):
+        if fib(num_segments + 5) > total_docs:
+            break
 
+    chunk_size = total_docs // num_segments if num_segments > 0 else total_docs
+    return max(min_chunk, min(max_chunk, chunk_size))
+
+
+def _iter_documents(batch_size: int = 1000):
+    """Yield all documents in batches, with prefetched relations."""
     base_qs = Document.objects.select_related(
         "correspondent",
         "document_type",
@@ -81,21 +102,42 @@ def index_reindex(*, progress_bar_disable=False):
         "owner",
     ).order_by("pk")
 
-    with (
-        AsyncWriter(ix) as writer,
-        tqdm.tqdm(total=total, disable=progress_bar_disable) as progress_bar,
-    ):
-        last_pk = 0
-        while True:
-            chunk = list(base_qs.filter(pk__gt=last_pk)[:chunk_size])
-            if not chunk:
-                break
-            prefetch_related_objects(chunk, "tags", "notes", "custom_fields__field")
-            for document in chunk:
-                index.update_document(writer, document)
-                progress_bar.update(1)
+    last_pk = 0
+    while True:
+        batch = list(base_qs.filter(pk__gt=last_pk)[:batch_size])
+        if not batch:
+            break
+        prefetch_related_objects(batch, "tags", "notes", "custom_fields__field")
+        yield from batch
+        last_pk = batch[-1].pk
 
-            last_pk = chunk[-1].pk
+
+def index_reindex(*, progress_bar_disable=False):
+    ix = index.open_index(recreate=True)
+    total = Document.objects.count()
+    commit_size = _compute_optimal_chunk_size(total)
+
+    logger.debug(f"Reindexing {total:,} documents")
+
+    with tqdm.tqdm(total=total, disable=progress_bar_disable) as progress_bar:
+        writer = AsyncWriter(ix)
+        segment_docs = 0
+
+        for document in _iter_documents():
+            index.update_document(writer, document)
+            progress_bar.update(1)
+            segment_docs += 1
+
+            if segment_docs >= commit_size:
+                logger.debug("Committing segment. This may take a while...")
+                writer.commit(merge=False)
+                writer = AsyncWriter(ix)
+                segment_docs = 0
+
+        if segment_docs > 0:
+            logger.debug("Committing final segment. This may take a while...")
+            writer.commit()
+    logger.debug("All documents have been reindexed.")
 
 
 @shared_task
