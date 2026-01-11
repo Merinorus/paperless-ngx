@@ -71,11 +71,7 @@ def index_optimize():
     writer.commit()
 
 
-def _compute_optimal_chunk_size(
-    total_docs: int,
-    min_chunk: int = 1000,
-    max_chunk: int = 50000,
-) -> int:
+def _compute_optimal_chunk_size(total_docs: int, min_chunk: int = 1000) -> int:
     """
     Compute optimal chunk size based on Whoosh's MERGE_SMALL policy.
 
@@ -90,7 +86,7 @@ def _compute_optimal_chunk_size(
             break
 
     chunk_size = total_docs // num_segments if num_segments > 0 else total_docs
-    return max(min_chunk, min(max_chunk, chunk_size))
+    return max(min_chunk, chunk_size)
 
 
 def _iter_documents(batch_size: int = 1000):
