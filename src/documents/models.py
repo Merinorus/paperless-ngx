@@ -21,6 +21,7 @@ from documents.utils import FULLTEXT_MINIMAL_TOKEN_LENGTH
 from documents.utils import escape_like_pattern
 from documents.utils import fulltext_compatible
 from documents.utils import split_fulltext_tokens
+from documents.utils import split_like_tokens
 
 if settings.AUDIT_LOG_ENABLED:
     from auditlog.registry import auditlog
@@ -74,39 +75,90 @@ class FulltextContains(Lookup):
             mysql_ft_tokens = [
                 t for t in tokens if len(t) >= FULLTEXT_MINIMAL_TOKEN_LENGTH
             ]
-            if mysql_ft_tokens:
-                # MariaDB has limitations: it can use fulltext search only for at least 3-char long tokens.
-                # Do a fulltext prefiltering to use fulltext index,
-                # then apply the actual search query (LIKE "%A%") to refine the results.
-                ft_search_exp = "+" + " +".join(mysql_ft_tokens) + "*"
-                sql = f"MATCH({lhs}) AGAINST (%s IN BOOLEAN MODE) AND {lhs} LIKE %s"
-                return sql, [ft_search_exp, like_search_exp]
+            if settings.FULLTEXT_EXACT_ORDER_SEARCH:
+                if mysql_ft_tokens:
+                    # MariaDB has limitations: it can use fulltext search only for at least 3-char long tokens.
+                    # Do a fulltext prefiltering to use fulltext index,
+                    # then apply the actual search query (LIKE "%A%") to refine the results.
+                    ft_search_exp = "+" + " +".join(mysql_ft_tokens) + "*"
+                    sql = f"MATCH({lhs}) AGAINST (%s IN BOOLEAN MODE) AND {lhs} LIKE %s"
+                    return sql, [ft_search_exp, like_search_exp]
+                else:
+                    # If there is no long enough token (3+ char long),
+                    # MariaDB can still look at the fulltext index for prefixes.
+                    # So we check prefixes for all tokens, e.g. "cv*", 'mr*", "d*".
+                    # Limitation: full words less than 3 chars won't be found.
+                    # Example: ["cv", 'mr", "d"]. will match "CV Mr Doe", not "CV Mr D".
+                    # even if they're less than 3-char long (e.g., "av").
+                    # Compared to a simple "LIKE %A%", it may return less results, but it avoids a full scan.
+                    prefilter_subclauses = []
+                    params = []
+                    for token in tokens:
+                        prefilter_subclauses.append(
+                            f"MATCH({lhs}) AGAINST (%s IN BOOLEAN MODE)",
+                        )
+                        params.append(f"{token}*")
+
+                    # We add a "LIKE A%" clause with the first token to help adding some results
+                    # Example: ["cv", 'mr", "d"] -> "LIKE cv%" will match "CV Mr D".
+                    prefilter_subclauses.append(f"{lhs} LIKE %s")
+                    params.append(f"{tokens[0]}%")
+
+                    # Still append the full query with "LIKE %A%" to refine results.
+                    sql = f"({' OR '.join(prefilter_subclauses)}) AND {lhs} LIKE %s"
+                    params.append(like_search_exp)
+                    return sql, params
             else:
-                # If there is no long enough token (3+ char long),
-                # MariaDB can still look at the fulltext index for prefixes.
-                # So we check prefixes for all tokens, e.g. "cv*", 'mr*", "d*".
-                # Limitation: full words less than 3 chars won't be found.
-                # Example: ["cv", 'mr", "d"]. will match "CV Mr Doe", not "CV Mr D".
-                # even if they're less than 3-char long (e.g., "av").
-                # Compared to a simple "LIKE %A%", it may return less results, but it avoids a full scan.
-                prefilter_subclauses = []
-                params = []
-                for token in tokens:
-                    prefilter_subclauses.append(
-                        f"MATCH({lhs}) AGAINST (%s IN BOOLEAN MODE)",
+                if mysql_ft_tokens:
+                    ft_search_exp = "+" + " +".join(mysql_ft_tokens) + "*"
+
+                    params = [ft_search_exp]
+                    like_clauses = []
+                    for t in split_like_tokens(rhs_params[0]):
+                        like_clauses.append(f"{lhs} LIKE %s")
+                        params.append(f"%{t}%")
+                    sql = (
+                        f"MATCH({lhs}) AGAINST (%s IN BOOLEAN MODE) AND "
+                        + " AND ".join(like_clauses)
                     )
-                    params.append(f"{token}*")
+                    return sql, params
+                else:
+                    # If there is no long enough token (3+ char long),
+                    # MariaDB can still look at the fulltext index for prefixes.
+                    # So we check prefixes for all tokens, e.g. "cv*", 'mr*", "d*".
+                    # Limitation: full words less than 3 chars won't be found.
+                    # Example: ["cv", 'mr", "d"]. will match "CV Mr Doe", not "CV Mr D".
+                    # even if they're less than 3-char long (e.g., "av").
+                    # Compared to a simple "LIKE %A%", it may return less results, but it avoids a full scan.
+                    prefilter_subclauses = []
+                    params = []
+                    for token in tokens:
+                        prefilter_subclauses.append(
+                            f"MATCH({lhs}) AGAINST (%s IN BOOLEAN MODE)",
+                        )
+                        params.append(f"{token}*")
 
-                # We add a "LIKE A%" clause with the first token to help adding some results
-                # Example: ["cv", 'mr", "d"] -> "LIKE cv%" will match "CV Mr D".
-                prefilter_subclauses.append(f"{lhs} LIKE %s")
-                params.append(f"{tokens[0]}%")
+                    # We add a "LIKE A%" clause with the first token to help adding some results
+                    # Example: ["cv", 'mr", "d"] -> "LIKE cv%" will match "CV Mr D".
+                    prefilter_subclauses.append(f"{lhs} LIKE %s")
+                    params.append(f"{tokens[0]}%")
 
-                # Still append the full query with "LIKE %A%" to refine results.
-                sql = f"({' OR '.join(prefilter_subclauses)}) AND {lhs} LIKE %s"
-                params.append(like_search_exp)
+                    # # Still append the full query with "LIKE %A%" to refine results.
+                    # sql = f"({' OR '.join(prefilter_subclauses)}) AND {lhs} LIKE %s"
+                    # params.append(like_search_exp)
+                    # return sql, params
 
-                return sql, params
+                    like_clauses = []
+                    for t in split_like_tokens(rhs_params[0]):
+                        like_clauses.append(f"{lhs} LIKE %s")
+                        params.append(f"%{t}%")
+                    # sql = f"MATCH({lhs}) AGAINST (%s IN BOOLEAN MODE) AND " + " AND ".join(like_clauses)
+                    sql = f"({' OR '.join(prefilter_subclauses)}) AND " + " AND ".join(
+                        like_clauses,
+                    )
+                    return sql, params
+
+                # TODO return ...
 
         elif (
             connection.vendor == "sqlite"

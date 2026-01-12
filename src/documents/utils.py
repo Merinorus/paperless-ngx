@@ -152,6 +152,10 @@ def split_fulltext_tokens(value):
     return [token for token in escape_fulltext(value).split()]
 
 
+def split_like_tokens(value):
+    return [token for token in escape_like_pattern(value).split()]
+
+
 NOT_FT_COMPATIBLE = re.compile(
     # CJK ideographs
     r"[\u4E00-\u9FFF"  # CJK Unified Ideographs
