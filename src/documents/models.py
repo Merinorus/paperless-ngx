@@ -120,10 +120,12 @@ class FulltextContains(Lookup):
             subquery = f"SELECT rowid FROM {compiler.quote_name_unless_alias(fts_table)} WHERE {column} MATCH %s"
             sql = f"{compiler.quote_name_unless_alias(main_table)}.id IN ({subquery})"
             return sql, [ft_search_exp]
-        else:
+        elif settings.FULLTEXT_ALLOW_LIKE_FALLBACK:
             # Fallback to icontains
             fallback_lookup = IContains(self.lhs, self.rhs)
             return fallback_lookup.as_sql(compiler, connection)
+        else:
+            return "False", []
 
 
 class ModelWithOwner(models.Model):
