@@ -61,7 +61,11 @@ class FulltextContains(Lookup):
         if connection.vendor == "postgresql" and fulltext_compatible(rhs_params[0]):
             # PostgreSQL phraseto_tsquery can directly search for the exact lemme sequence.
             # Just make sure to fail silently when no token can be used for the full-text search (empty query).
-            sql = rf"to_tsvector('simple', {lhs}) @@ CASE WHEN length(regexp_replace(phraseto_tsquery('simple', %s)::text, '\s', '', 'g')) > 0 THEN (phraseto_tsquery('simple', %s)::text || ':*')::tsquery ELSE NULL END"
+            if settings.FULLTEXT_EXACT_ORDER_SEARCH:
+                tsquery_func = "phraseto_tsquery"
+            else:
+                tsquery_func = "plainto_tsquery"
+            sql = rf"to_tsvector('simple', {lhs}) @@ CASE WHEN length(regexp_replace({tsquery_func}('simple', %s)::text, '\s', '', 'g')) > 0 THEN ({tsquery_func}('simple', %s)::text || ':*')::tsquery ELSE NULL END"
             return sql, [rhs_params[0], rhs_params[0]]
 
         elif connection.vendor in {"mysql", "mariadb"} and fulltext_compatible(
@@ -120,10 +124,12 @@ class FulltextContains(Lookup):
             subquery = f"SELECT rowid FROM {compiler.quote_name_unless_alias(fts_table)} WHERE {column} MATCH %s"
             sql = f"{compiler.quote_name_unless_alias(main_table)}.id IN ({subquery})"
             return sql, [ft_search_exp]
-        else:
+        elif settings.FULLTEXT_ALLOW_LIKE_FALLBACK:
             # Fallback to icontains
             fallback_lookup = IContains(self.lhs, self.rhs)
             return fallback_lookup.as_sql(compiler, connection)
+        else:
+            return "False", []
 
 
 class ModelWithOwner(models.Model):

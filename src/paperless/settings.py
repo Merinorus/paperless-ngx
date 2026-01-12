@@ -762,6 +762,14 @@ if os.getenv("PAPERLESS_DBENGINE") == "mariadb":
     SILENCED_SYSTEM_CHECKS = ["mysql.W003"]
 
 DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
+FULLTEXT_EXACT_ORDER_SEARCH = __get_boolean(
+    "PAPERLESS_FULLTEXT_EXACT_ORDER_SEARCH",
+    "YES",
+)
+FULLTEXT_ALLOW_LIKE_FALLBACK = __get_boolean(
+    "PAPERLESS_FULLTEXT_ALLOW_LIKE_FALLBACK",
+    "NO",
+)
 
 ###############################################################################
 # Internationalization                                                        #
