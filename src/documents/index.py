@@ -43,7 +43,7 @@ index_dir = f"{settings.INDEX_DIR}_tantivy"
 CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+")
 WORD_RE = re.compile(r"\w+", flags=re.IGNORECASE)
 
-MAX_RESULT_LIMIT = 1001
+MAX_RESULT_LIMIT = 10001
 
 
 def extract_bigram_content(text: str) -> str:
@@ -916,7 +916,7 @@ FIELD_EXPR_RE = re.compile(
         |
         [^,\s]+           # ou valeur simple
     )
-    (?:,|(?=\s|$))        # séparée par virgule ou escape/fin
+    (?:,|(?=[\s)]|$))     # séparée par virgule, escape, parenthèse fermante ou fin
     """,
     re.VERBOSE,
 )
@@ -952,11 +952,10 @@ class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         q_str = self.query_params["query"]
         print(f"raw query: {q_str}")
-
-        q_str = normalize_query(q_str)
-        print(f"normalized query: {q_str}")
         q_str = rewrite_natural_date_keywords(q_str)
         print(f"with natural date keywords: {q_str}")
+        q_str = normalize_query(q_str)
+        print(f"normalized query: {q_str}")
 
         q_str = rewrite_default_and_keywords(q_str)
         print(f"with default and keywords: {q_str}")
@@ -1285,9 +1284,9 @@ def rewrite_natural_date_keywords(query_string: str) -> str:
                 start = datetime(local_now.year - 1, 1, 1, 0, 0, 0, tzinfo=tz)
                 end = datetime(local_now.year - 1, 12, 31, 23, 59, 59, tzinfo=tz)
 
-        # Convert to UTC and format
-        start_str = start.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S")
-        end_str = end.astimezone(timezone.utc).strftime("%Y%m%d%H%M%S")
+        # Convert to UTC and format as RFC 3339 for Tantivy date fields
+        start_str = start.astimezone(timezone.utc).isoformat()
+        end_str = end.astimezone(timezone.utc).isoformat()
         return f"{field}:[{start_str} TO {end_str}]"
 
     return re.sub(pattern, repl, query_string, flags=re.IGNORECASE)
