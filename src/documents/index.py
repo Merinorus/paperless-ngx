@@ -7,7 +7,6 @@ import os
 import re
 import threading
 import unicodedata
-from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime
 from datetime import time
@@ -505,6 +504,27 @@ class TantivyResultsPage:
         return [result.id for result in self.results]
 
 
+class SimplePage:
+    """A pre-sliced page of results. No internal re-pagination."""
+
+    def __init__(self, results: list[Hit], total: int):
+        self.results = results
+        self.total = total
+
+    def __getitem__(self, n):
+        return self.results[n]
+
+    def __iter__(self):
+        return iter(self.results)
+
+    def __len__(self):
+        return self.total
+
+    @property
+    def doc_ids(self):
+        return [hit.id for hit in self.results]
+
+
 class DelayedQuery:
     def _get_query(self):
         raise NotImplementedError  # pragma: no cover
@@ -560,19 +580,90 @@ class DelayedQuery:
         self.filter_queryset = filter_queryset
         self.suggested_correction = None
         self.user = user
+        self._count: int | None = None
+        self._combined_query = None
+        self._sort_field = None
+        self._sort_order = None
+
+    def _build_combined_query(self):
+        """Build the Tantivy query with permissions baked in. Called once."""
+        if self._combined_query is not None:
+            return
+
+        q, mask, suggested_correction = self._get_query()
+        self.suggested_correction = suggested_correction
+
+        # Combine search query with permissions query
+        schema = get_schema()
+        perm_q = get_permissions_query(self.user, schema)
+        self._combined_query = tantivy.Query.boolean_query(
+            [
+                (tantivy.Occur.Must, q),
+                (tantivy.Occur.Must, perm_q),
+            ],
+        )
+
+        sortedby, reverse = self._get_query_sortedby()
+        self._sort_field = sortedby
+        self._sort_order = tantivy.Order.Desc if reverse else tantivy.Order.Asc
+
+        # Handle "more like this" special case
+        if isinstance(self, DelayedMoreLikeThisQuery) and sortedby not in [
+            "score",
+            None,
+        ]:
+            search_result = self.searcher.search(
+                self._combined_query,
+                limit=MAX_RESULT_LIMIT,
+            ).hits
+            more_like_this_ids = [
+                self.searcher.doc(doc_addr)["id"][0] for _, doc_addr in search_result
+            ]
+            self._combined_query = tantivy.Query.boolean_query(
+                [
+                    (
+                        tantivy.Occur.Must,
+                        tantivy.Query.term_set_query(
+                            schema,
+                            "id",
+                            more_like_this_ids,
+                        ),
+                    ),
+                    (tantivy.Occur.Must, perm_q),
+                ],
+            )
 
     def __len__(self) -> int:
         if self._manual_sort_requested():
             manual_hits = self._manual_hits()
             return len(manual_hits)
 
-        page = self[0:1]
-        return len(page)
+        if self._count is None:
+            self._build_combined_query()
+            # In tantivy, no need to fetch all results to count them, one is enough
+            result = self.searcher.search(
+                self._combined_query,
+                limit=1,
+            )
+            self._count = result.count
+        return self._count
+
+    def _get_all_ids(self) -> list[int]:
+        """Get all matching document IDs (used for "select all" in front-end). Lightweight, without snippets."""
+        self._build_combined_query()
+        result = self.searcher.search(
+            self._combined_query,
+            limit=MAX_RESULT_LIMIT,
+            order_by_field=self._sort_field,
+            order=self._sort_order,
+        )
+        ids = []
+        for _, doc_addr in result.hits:
+            doc = self.searcher.doc(doc_addr)
+            ids.append(doc["id"][0])
+        return ids
 
     def __getitem__(self, item: slice):
-        import time
-
-        t0 = time.time()
         if item.start in self.saved_results:
             return self.saved_results[item.start]
 
@@ -585,113 +676,57 @@ class DelayedQuery:
             self.saved_results[start] = page
             return page
 
-        q, mask, suggested_correction = self._get_query()
-        print(q)
-        self.suggested_correction = suggested_correction
+        self._build_combined_query()
+        q = self._combined_query
 
-        sortedby, reverse = self._get_query_sortedby()
-        order = tantivy.Order.Desc if reverse else tantivy.Order.Asc
-        if isinstance(self, DelayedMoreLikeThisQuery) and sortedby not in [
-            "score",
-            None,
-        ]:
-            # Special case: "more like this" query doesn't support sort and order
-            # So we fetch the IDs of the corresponding items,
-            # then query by theirs IDs to be able to sort them.
-            search_result = self.searcher.search(
-                q,
-                limit=MAX_RESULT_LIMIT,  # TODO set limit for performance?
-            ).hits
-            more_like_this_ids = list()
-            for _, doc_addr in search_result:
-                doc = self.searcher.doc(doc_addr)
-                doc_id = doc["id"][0]
-                more_like_this_ids.append(doc_id)
-            q = tantivy.Query.term_set_query(
-                get_schema(),
-                "id",
-                more_like_this_ids,
-            )
+        start = item.start or 0
+        page_size = (item.stop - start) if item.stop else self.page_size
 
-        pagenum = math.floor(item.start / self.page_size) + 1
-        pagelen = self.page_size
-        # offset = (pagenum - 1) * pagelen
-        # print(f"offset: {offset}")
-        t1 = time.time()
-        search_result = self.searcher.search(
+        result = self.searcher.search(
             q,
-            # limit=pagelen+1,
-            limit=MAX_RESULT_LIMIT,  # TODO set limit for performance?
-            offset=(pagenum - 1) * pagelen,
-            order_by_field=sortedby,
-            order=order,
-        ).hits
-        # print(f"query and tantivy search took {time.time() - t1:.3f} seconds")
-        results = list()
-        # print(2)
-        # if self.filter_queryset:
-        if self.filter_queryset is not None:
-            # print(3)
-            # print(self.filter_queryset)
-            # print(self.filter_queryset.query)
-            t1 = time.time()
-            allowed_ids = set(self.filter_queryset.values_list("id", flat=True))
-            # print(f"DB query took {time.time() - t1:.3f} seconds")
-            # print(3.1)
-            # print(search_result)
-            content_snippet_generator = tantivy.SnippetGenerator.create(
-                self.searcher,
-                q,
-                get_schema(),
-                "content",
-            )
-            content_snippet_generator.set_max_num_chars(550)
-            note_snippet_generator = tantivy.SnippetGenerator.create(
-                self.searcher,
-                q,
-                get_schema(),
-                "notes",
-            )
-            note_snippet_generator.set_max_num_chars(100)
-            results = list()
-            hit_scores = defaultdict(float)  # doc_id -> max score
-            for score, doc_addr in search_result:
-                doc = self.searcher.doc(doc_addr)
-                doc_id = doc["id"][0]
-                if doc_id in allowed_ids:
-                    # print(3.3)
-                    # results.append({"id": doc["id"][0], "score": score})
-                    hit_scores[doc_id] = max(hit_scores[doc_id], score)
-                    # results.append(Hit(doc["id"][0], score))
-                    # print(3.4)
-
-                    # Generate highlights
-                    content_snippet = content_snippet_generator.snippet_from_doc(doc)
-                    note_snippet = note_snippet_generator.snippet_from_doc(doc)
-
-                    results.append(
-                        Hit(
-                            doc["id"][0],
-                            score,
-                            content=content_snippet.fragment(),
-                            highlights=content_snippet.to_html(),
-                            note_highlights=note_snippet.to_html(),
-                        ),
-                    )
-
-            for idx, hit in enumerate(results, start=1):
-                hit.rank = idx
-
-        else:
-            # TODO
-            raise NotImplementedError
-
-        page = TantivyResultsPage(
-            results=results,
-            pagenum=math.floor(item.start / self.page_size) + 1,
-            pagelen=self.page_size,
+            limit=page_size,
+            offset=start,
+            order_by_field=self._sort_field,
+            order=self._sort_order,
         )
-        self.saved_results[item.start] = page
+
+        if self._count is None:
+            self._count = result.count
+
+        # Generate snippets only for this page
+        content_snippet_generator = tantivy.SnippetGenerator.create(
+            self.searcher,
+            q,
+            get_schema(),
+            "content",
+        )
+        content_snippet_generator.set_max_num_chars(550)
+        note_snippet_generator = tantivy.SnippetGenerator.create(
+            self.searcher,
+            q,
+            get_schema(),
+            "notes",
+        )
+        note_snippet_generator.set_max_num_chars(100)
+
+        hits = []
+        for rank, (score, doc_addr) in enumerate(result.hits, start=start + 1):
+            doc = self.searcher.doc(doc_addr)
+            content_snippet = content_snippet_generator.snippet_from_doc(doc)
+            note_snippet = note_snippet_generator.snippet_from_doc(doc)
+            hits.append(
+                Hit(
+                    doc["id"][0],
+                    score,
+                    rank=rank,
+                    content=content_snippet.fragment(),
+                    highlights=content_snippet.to_html(),
+                    note_highlights=note_snippet.to_html(),
+                ),
+            )
+
+        page = SimplePage(results=hits, total=result.count)
+        self.saved_results[start] = page
         return page
 
 
@@ -964,7 +999,7 @@ class DelayedFullTextQuery(DelayedQuery):
         text_terms = extract_query_parts(q_str)["text_terms"]
         print(f"text terms: {text_terms}")
         if settings.ADVANCED_FUZZY_SEARCH_TRESHOLD and any(
-            [len(t) >= settings.ADVANCED_FUZZY_SEARCH_TRESHOLD for t in text_terms]
+            [len(t) >= settings.ADVANCED_FUZZY_SEARCH_TRESHOLD for t in text_terms],
         ):
             fuzzy_search = True
         else:

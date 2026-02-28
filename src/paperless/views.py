@@ -68,17 +68,11 @@ class StandardPagination(PageNumberPagination):
         )
 
     def get_all_result_ids(self):
-        # print("get_all_result_ids")
         query = self.page.paginator.object_list
-        ids = []
         if isinstance(query, DelayedQuery):
-            try:
-                ids.extend(query.saved_results.get(0).doc_ids)
-            except Exception as e:
-                print(f"Exception: {e}")
+            return query._get_all_ids()
         else:
-            ids = list(query.values_list("pk", flat=True))
-        return ids
+            return list(query.values_list("pk", flat=True))
 
     def get_paginated_response_schema(self, schema):
         response_schema = super().get_paginated_response_schema(schema)
