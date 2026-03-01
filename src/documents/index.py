@@ -282,6 +282,8 @@ def update_document(
     doc: Document,
     effective_content: str | None = None,
     viewer_ids: list[int] | None = None,
+    *,
+    skip_delete: bool = False,
 ) -> None:
     if effective_content is None:
         effective_content = doc.content
@@ -312,9 +314,10 @@ def update_document(
         )
         viewer_ids = [int(u.id) for u in users_with_perms]
 
-    writer.delete_documents_by_query(
-        tantivy.Query.term_query(get_schema(), "id", doc.pk),
-    )
+    if not skip_delete:
+        writer.delete_documents_by_query(
+            tantivy.Query.term_query(get_schema(), "id", doc.pk),
+        )
     indexed_doc = tantivy.Document(
         id=doc.pk,
         title=doc.title or "",

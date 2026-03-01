@@ -120,6 +120,7 @@ def index_reindex(*, progress_bar_disable=False) -> None:
                         writer,
                         document,
                         viewer_ids=viewer_map.get(document.pk, []),
+                        skip_delete=True,
                     )
                     progress_bar.update(1)
 
