@@ -281,6 +281,7 @@ def update_document(
     writer: tantivy.IndexWriter,
     doc: Document,
     effective_content: str | None = None,
+    viewer_ids: list[int] | None = None,
 ) -> None:
     if effective_content is None:
         effective_content = doc.content
@@ -303,11 +304,13 @@ def update_document(
             f"{Document.ARCHIVE_SERIAL_NUMBER_MAX:,}.",
         )
         asn = 0
-    users_with_perms = get_users_with_perms(
-        doc,
-        only_with_perms_in=["view_document"],
-    )
-    viewer_ids = [int(u.id) for u in users_with_perms]
+    if viewer_ids is None:
+        # Fallback for single-document indexing (not bulk reindex)
+        users_with_perms = get_users_with_perms(
+            doc,
+            only_with_perms_in=["view_document"],
+        )
+        viewer_ids = [int(u.id) for u in users_with_perms]
 
     writer.delete_documents_by_query(
         tantivy.Query.term_query(get_schema(), "id", doc.pk),

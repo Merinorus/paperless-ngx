@@ -68,6 +68,28 @@ def index_optimize():
     writer.commit(optimize=True)
 
 
+def _bulk_get_viewer_ids(doc_pks):
+    """Fetch all view_document permissions for a batch of documents in one query."""
+    from collections import defaultdict
+
+    from django.contrib.auth.models import Permission
+    from guardian.models import UserObjectPermission
+
+    ct = ContentType.objects.get_for_model(Document)
+    perm = Permission.objects.get(content_type=ct, codename="view_document")
+
+    qs = UserObjectPermission.objects.filter(
+        content_type=ct,
+        permission=perm,
+        object_pk__in=[str(pk) for pk in doc_pks],
+    ).values_list("object_pk", "user_id")
+
+    viewer_map = defaultdict(list)
+    for object_pk, user_id in qs:
+        viewer_map[int(object_pk)].append(user_id)
+    return viewer_map
+
+
 def index_reindex(*, progress_bar_disable=False) -> None:
     total = Document.objects.count()
     chunk_size = 1000  # Load docs from DB in RAM by chunks
@@ -89,8 +111,16 @@ def index_reindex(*, progress_bar_disable=False) -> None:
 
                 prefetch_related_objects(chunk, "tags", "notes", "custom_fields__field")
 
+                # Bulk-fetch permissions: 1 query per chunk instead of 1 per doc
+                chunk_pks = [doc.pk for doc in chunk]
+                viewer_map = _bulk_get_viewer_ids(chunk_pks)
+
                 for document in chunk:
-                    index.update_document(writer, document)
+                    index.update_document(
+                        writer,
+                        document,
+                        viewer_ids=viewer_map.get(document.pk, []),
+                    )
                     progress_bar.update(1)
 
                 last_pk = chunk[-1].pk
