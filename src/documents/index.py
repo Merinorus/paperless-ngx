@@ -592,22 +592,35 @@ class DelayedQuery:
         self._sort_order = None
 
     def _build_combined_query(self):
-        """Build the Tantivy query with permissions baked in. Called once."""
+        """Build the Tantivy query with permissions and DRF filters baked in. Called once."""
         if self._combined_query is not None:
             return
 
         q, mask, suggested_correction = self._get_query()
         self.suggested_correction = suggested_correction
 
-        # Combine search query with permissions query
         schema = get_schema()
         perm_q = get_permissions_query(self.user, schema)
-        self._combined_query = tantivy.Query.boolean_query(
-            [
-                (tantivy.Occur.Must, q),
-                (tantivy.Occur.Must, perm_q),
-            ],
-        )
+
+        clauses = [
+            (tantivy.Occur.Must, q),
+            (tantivy.Occur.Must, perm_q),
+        ]
+
+        # Apply DRF filters (tags, correspondent, type, etc.) via filter_queryset
+        if self.filter_queryset is not None:
+            base_count = Document.objects.count()
+            filtered_ids = list(self.filter_queryset.values_list("id", flat=True))
+            if len(filtered_ids) < base_count:
+                # Extra filters are active — restrict Tantivy results to these IDs
+                filter_q = tantivy.Query.term_set_query(
+                    schema,
+                    "id",
+                    filtered_ids,
+                )
+                clauses.append((tantivy.Occur.Must, filter_q))
+
+        self._combined_query = tantivy.Query.boolean_query(clauses)
 
         sortedby, reverse = self._get_query_sortedby()
         self._sort_field = sortedby
