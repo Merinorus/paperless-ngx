@@ -626,7 +626,7 @@ class DelayedQuery:
         if self._combined_query is not None:
             return
 
-        q, mask, suggested_correction = self._get_query()
+        q, suggested_correction = self._get_query()
         self.suggested_correction = suggested_correction
 
         schema = get_schema()
@@ -1113,7 +1113,7 @@ class DelayedFullTextQuery(DelayedQuery):
             )
             suggested_correction = words[0] if words and words[0] != q_str else None
 
-        return q, None, suggested_correction
+        return q, suggested_correction
 
 
 class DelayedMoreLikeThisQuery(DelayedQuery):
@@ -1137,9 +1137,7 @@ class DelayedMoreLikeThisQuery(DelayedQuery):
             ],
         )
 
-        mask = None  # TODO?
-
-        return q, mask, None
+        return q, None
 
 
 def _normalize(text: str) -> str:
