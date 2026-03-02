@@ -244,8 +244,8 @@ class AsyncWriter(threading.Thread):
 
 
 @contextmanager
-def open_index_writer(*, reload=True, **kwargs):
-    with open_index(reload=reload) as index:
+def open_index_writer(*, recreate=False, reload=True, **kwargs):
+    with open_index(recreate=recreate, reload=reload) as index:
         writer = AsyncWriter(index, num_threads=os.cpu_count() or 0)
         try:
             yield writer
@@ -678,8 +678,8 @@ class DelayedQuery:
         )
         ids = []
         for _, doc_addr in result.hits:
-            doc = self.searcher.doc(doc_addr)
-            ids.append(doc["id"][0])
+            doc_id = self.searcher.doc(doc_addr)["id"][0]
+            ids.append(doc_id)
         return ids
 
     def __getitem__(self, item: slice):

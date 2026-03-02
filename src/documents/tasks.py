@@ -101,7 +101,7 @@ def index_reindex(*, progress_bar_disable=False) -> None:
         "owner",
     ).order_by("pk")
 
-    with index.open_index_writer() as writer:
+    with index.open_index_writer(recreate=True) as writer:
         with tqdm.tqdm(total=total, disable=progress_bar_disable) as progress_bar:
             last_pk = 0
             while True:
