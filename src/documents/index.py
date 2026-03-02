@@ -1060,8 +1060,10 @@ class DelayedFullTextQuery(DelayedQuery):
         else:
             fuzzy_search = False
         # TODO: date parsing plugin like whoosh
+
         with open_index() as index:
             queries = list()
+            field_boosts = {"title": 1.5, "notes": 0.8}
             q = index.parse_query_lenient(
                 q_str,
                 [
@@ -1077,7 +1079,7 @@ class DelayedFullTextQuery(DelayedQuery):
                     "created",
                     "modified",
                 ],
-                field_boosts={"title": 5.0, "content": 0.5},
+                field_boosts=field_boosts,
                 conjunction_by_default=True,
             )[0]
             queries.append(q)
@@ -1088,18 +1090,14 @@ class DelayedFullTextQuery(DelayedQuery):
                     q_str,
                     [
                         "content",
-                        "bigram_content",
                         "title",
                         "correspondent",
                         "tag",
                         "type",
                         "notes",
                         "custom_fields",
-                        "added",
-                        "created",
-                        "modified",
                     ],
-                    field_boosts={"title": 3.0, "content": 0.5},
+                    field_boosts=field_boosts,
                     fuzzy_fields={
                         "content": (True, 1, True),
                         "title": (True, 1, True),
