@@ -326,6 +326,7 @@ def update_document(
         correspondent=doc.correspondent.name if doc.correspondent else "",
         correspondent_id=doc.correspondent.id if doc.correspondent else 0,
         has_correspondent=doc.correspondent is not None,
+        tag=tags,
         has_tag=len(tags) > 0,
         type=doc.document_type.name if doc.document_type else "",
         type_id=doc.document_type.id if doc.document_type else 0,
