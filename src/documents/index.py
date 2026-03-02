@@ -1293,7 +1293,7 @@ def get_permissions_query(user: User | None, schema) -> tantivy.Query:
         return tantivy.Query.all_query()
 
     # Always return documents with no owner
-    queries = [tantivy.Query.term_query(schema, "has_owner", "false")]
+    queries = [tantivy.Query.term_query(schema, "has_owner", False)]
 
     if user:
         user_id = str(user.id)
