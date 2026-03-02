@@ -1241,7 +1241,7 @@ def autocomplete(
                 prefix_subquery = tantivy.Query.regex_query(
                     schema,
                     "autocomplete_word",
-                    f"{normalized_term}.*",
+                    f"{re.escape(normalized_term)}.*",
                 )
         except ValueError as e:
             # Autocomplete doesn't support special terms, e.g. parentheses, +, - etc.
