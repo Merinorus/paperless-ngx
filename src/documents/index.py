@@ -1197,36 +1197,21 @@ def autocomplete(
     fuzzy_search=False,
 ) -> list[str]:
     """
-    Returns a list of autocomplete suggestions for the given term.
-    Caveat: documents are searched by Tantivy TF-IDF score,
-    but for each document found, all prefixes in this document are added to the list.
-    So only the first prefix is guaranteed to have the highest score.
+    Returns autocomplete suggestions ranked by document frequency,
+    matching the original Whoosh behavior: terms that appear in more
+    documents are ranked higher. The exact match is always first.
     """
+    from collections import Counter
+
+    if limit <= 0:
+        return []
+
     with open_index() as index:
-        result: list[str] = list()
         searcher = index.searcher()
         schema = index.schema
         perm_q = get_permissions_query(user, schema)
         normalized_term = _normalize(term)
 
-        # Find the exact match first
-        exact_subquery = tantivy.Query.term_query(
-            schema,
-            "autocomplete_word",
-            normalized_term,
-        )
-        exact_q = tantivy.Query.boolean_query(
-            [
-                (tantivy.Occur.Must, exact_subquery),
-                (tantivy.Occur.Must, perm_q),
-            ],
-        )
-
-        hits = searcher.search(exact_q, limit=1).hits
-        if hits:
-            result.append(term)
-
-        # Find prefixed terms until limit is reached
         try:
             if fuzzy_search:
                 prefix_subquery = tantivy.Query.fuzzy_term_query(
@@ -1244,46 +1229,51 @@ def autocomplete(
                     f"{re.escape(normalized_term)}.*",
                 )
         except ValueError as e:
-            # Autocomplete doesn't support special terms, e.g. parentheses, +, - etc.
             logger.debug(f"{e}")
             return []
-        seen = set()
-        remaining_limit = limit - len(result)
-        while len(result) < limit:
-            seen_q = []
-            for word in seen:
-                seen_q.append(
-                    (
-                        tantivy.Occur.MustNot,
-                        tantivy.Query.term_query(schema, "autocomplete_word", word),
-                    ),
-                )
-            prefix_q = tantivy.Query.boolean_query(
-                [
-                    (tantivy.Occur.MustNot, exact_subquery),
-                    (tantivy.Occur.Must, prefix_subquery),
-                    (tantivy.Occur.Must, perm_q),
-                    *seen_q,
-                ],
-            )
 
-            hits = searcher.search(prefix_q, limit=remaining_limit * 5).hits
-            if not hits:
-                return result
-            found_new_word = False
-            for _, addr in hits:
-                doc = searcher.doc(addr)
-                all_words = doc["autocomplete_word"]
-                for word in prefix_view(all_words, normalized_term):
-                    if word in seen:
-                        continue
-                    seen.add(word)
-                    found_new_word = True
-                    result.append(word)
-                    if len(result) >= limit:
-                        return result
-            if not found_new_word:
-                return result
+        prefix_q = tantivy.Query.boolean_query(
+            [
+                (tantivy.Occur.Must, prefix_subquery),
+                (tantivy.Occur.Must, perm_q),
+            ],
+        )
+
+        # Fetch enough documents to get a good frequency count.
+        # Each doc may contain multiple matching words; we count
+        # how many docs each word appears in (= document frequency).
+        doc_limit = limit * 50
+        hits = searcher.search(prefix_q, limit=doc_limit).hits
+
+        # Step 1: count each exact variant (e.g. ouï:1, oui:9)
+        variant_count: Counter[str] = Counter()
+        for _, addr in hits:
+            doc = searcher.doc(addr)
+            all_words = doc["autocomplete_word"]
+            seen_in_doc: set[str] = set()
+            for word in prefix_view(all_words, normalized_term):
+                if word not in seen_in_doc:
+                    seen_in_doc.add(word)
+                    variant_count[word] += 1
+
+        # Step 2: merge variants with same normalization, keep most frequent (eg: oui)
+        best_variant: dict[str, str] = {}
+        merged_count: Counter[str] = Counter()
+        for word, count in variant_count.most_common():
+            key = _normalize(word)
+            if key not in best_variant:
+                # First seen = highest count = best variant
+                best_variant[key] = word
+            merged_count[key] += count
+
+        # Step 3: return best variant for each, ranked by merged count
+        result = [best_variant[key] for key, _ in merged_count.most_common(limit)]
+
+        # Bump the exact match to position 0 if present
+        normalized_match = best_variant.get(normalized_term)
+        if normalized_match and normalized_match in result:
+            result.insert(0, result.pop(result.index(normalized_match)))
+
         return result
 
 
