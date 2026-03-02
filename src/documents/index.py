@@ -1015,11 +1015,13 @@ FIELD_EXPR_RE = re.compile(
     (?P<field>\w+)
     \s*:\s*
     (?P<value>
-        \[[^\[\]]*\]      # plage entre crochets
+        \[[^\[\]]*\]      # [...]
         |
-        [^,\s]+           # ou valeur simple
+        \([^)]*\)         # (...)
+        |
+        [^,\s]+           # simple value
     )
-    (?:,|(?=[\s)]|$))     # séparée par virgule, escape, parenthèse fermante ou fin
+    (?:,|(?=[\s)]|$))     # separated by comma, escape, closing parentheses or end
     """,
     re.VERBOSE,
 )
