@@ -360,7 +360,7 @@ def update_document(
         has_owner=bool(doc.owner and doc.owner.id is not None),
         checksum=doc.checksum or "",
         page_count=doc.page_count or 0,
-        original_filename=doc.original_filename,
+        original_filename=doc.original_filename or "",
         is_shared=len(viewer_ids) > 0,
     )
     for tag_id in tags_ids:
