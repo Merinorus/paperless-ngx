@@ -566,9 +566,38 @@ class DelayedQuery:
             return sort_fields_map[field], reverse
 
     def _manual_sort_requested(self):
-        # See https://github.com/paperless-ngx/paperless-ngx/pull/11383
-        # Tantivy implementation was done before this PR. Needs to implement.
-        return False
+        ordering = self.query_params.get("ordering", "")
+        return ordering.lstrip("-").startswith("custom_field_")
+
+    def _manual_hits(self):
+        if self._manual_hits_cache is not None:
+            return self._manual_hits_cache
+
+        # Fetch all matching IDs directly from Tantivy (permissions + DRF filters)
+        self._build_combined_query()
+        result = self.searcher.search(
+            self._combined_query,
+            limit=MAX_RESULT_LIMIT,
+        )
+        matching_ids = [
+            self.searcher.doc(doc_addr)["id"][0] for _, doc_addr in result.hits
+        ]
+
+        # filter_queryset already has the correct order_by applied
+        # by DocumentsOrderingFilter (annotates custom_field_value + has_field)
+        ordered_ids = list(
+            self.filter_queryset.filter(id__in=matching_ids).values_list(
+                "id",
+                flat=True,
+            ),
+        )
+        ordered_ids = list(dict.fromkeys(ordered_ids))
+
+        self._manual_hits_cache = [
+            Hit(id=doc_id, score=0.0, rank=rank, highlights="", note_highlights="")
+            for rank, doc_id in enumerate(ordered_ids, start=1)
+        ]
+        return self._manual_hits_cache
 
     def __init__(
         self,
@@ -590,6 +619,7 @@ class DelayedQuery:
         self._combined_query = None
         self._sort_field = None
         self._sort_order = None
+        self._manual_hits_cache: list | None = None
 
     def _build_combined_query(self):
         """Build the Tantivy query with permissions and DRF filters baked in. Called once."""
@@ -669,6 +699,8 @@ class DelayedQuery:
 
     def _get_all_ids(self) -> list[int]:
         """Get all matching document IDs (used for "select all" in front-end). Lightweight, without snippets."""
+        if self._manual_sort_requested():
+            return [hit.id for hit in self._manual_hits()]
         self._build_combined_query()
         result = self.searcher.search(
             self._combined_query,
@@ -750,17 +782,10 @@ class DelayedQuery:
 
 
 class ManualResultsPage(list):
+    """A page of manually-sorted Hit objects (backed by Django ordering)."""
+
     def __init__(self, hits):
         super().__init__(hits)
-        self.results = ManualResults(hits)
-
-
-class ManualResults:
-    def __init__(self, hits):
-        self._docnums = [hit.docnum for hit in hits]
-
-    def docs(self):
-        return self._docnums
 
 
 class LocalDateParser(English):
