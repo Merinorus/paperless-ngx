@@ -91,7 +91,14 @@ def get_schema():
     sb = tantivy.SchemaBuilder()
     # TODO are all the has_ really needed?
     sb.add_integer_field("id", stored=True, indexed=True)
-    sb.add_text_field("title", stored=True, fast=True, index_option="basic")
+    # Custom analyzer cannot be used for sorting, so two fields are needed if we want to be diacritic insensitive
+    sb.add_text_field(
+        "title",
+        stored=True,
+        index_option="basic",
+        tokenizer_name="simple_analyzer",
+    )
+    sb.add_text_field("title_sort", fast=True, index_option="basic")
     sb.add_text_field(
         "autocomplete_word",
         stored=True,
@@ -105,13 +112,15 @@ def get_schema():
         index_option="freq",
     )  # used for languages such as CJK
     sb.add_integer_field("asn", stored=True, fast=True)
-    sb.add_text_field("correspondent", stored=True, fast=True, tokenizer_name="default")
+    sb.add_text_field("correspondent", stored=True, tokenizer_name="simple_analyzer")
+    sb.add_text_field("correspondent_sort", fast=True)
     sb.add_integer_field("correspondent_id", stored=True)
     sb.add_boolean_field("has_correspondent", stored=True)
     sb.add_text_field("tag", stored=True, tokenizer_name="simple_analyzer")
     sb.add_integer_field("tag_id", stored=True)
     sb.add_boolean_field("has_tag", stored=True)
-    sb.add_text_field("type", stored=True, fast=True, tokenizer_name="default")
+    sb.add_text_field("type", stored=True, tokenizer_name="simple_analyzer")
+    sb.add_text_field("type_sort", fast=True)
     sb.add_integer_field("type_id", stored=True)
     sb.add_boolean_field("has_type", stored=True)
     sb.add_date_field(
@@ -321,14 +330,17 @@ def update_document(
     indexed_doc = tantivy.Document(
         id=doc.pk,
         title=doc.title or "",
+        title_sort=doc.title or "",
         content=effective_content,
         bigram_content=extract_bigram_content(effective_content),
         correspondent=doc.correspondent.name if doc.correspondent else "",
+        correspondent_sort=doc.correspondent.name if doc.correspondent else "",
         correspondent_id=doc.correspondent.id if doc.correspondent else 0,
         has_correspondent=doc.correspondent is not None,
         tag=tags,
         has_tag=len(tags) > 0,
         type=doc.document_type.name if doc.document_type else "",
+        type_sort=doc.document_type.name if doc.document_type else "",
         type_id=doc.document_type.id if doc.document_type else 0,
         has_type=doc.document_type is not None,
         created=datetime_to_tantivy(datetime.combine(doc.created, time.min)),
@@ -546,9 +558,9 @@ class DelayedQuery:
             "created": "created",
             "modified": "modified",
             "added": "added",
-            "title": "title",
-            "correspondent__name": "correspondent",
-            "document_type__name": "type",
+            "title": "title_sort",
+            "correspondent__name": "correspondent_sort",
+            "document_type__name": "type_sort",
             "archive_serial_number": "asn",
             "num_notes": "num_notes",
             "owner": "owner",
