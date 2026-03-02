@@ -32,13 +32,13 @@ class TestAutoComplete(DirectoriesMixin, TestCase):
 
         self.assertListEqual(
             index.autocomplete(ix, "tes"),
-            [b"test2", b"test", b"test3"],
+            ["test2", "test", "test3"],
         )
         self.assertListEqual(
             index.autocomplete(ix, "tes", limit=3),
-            [b"test2", b"test", b"test3"],
+            ["test2", "test", "test3"],
         )
-        self.assertListEqual(index.autocomplete(ix, "tes", limit=1), [b"test2"])
+        self.assertListEqual(index.autocomplete(ix, "tes", limit=1), ["test2"])
         self.assertListEqual(index.autocomplete(ix, "tes", limit=0), [])
 
     def test_archive_serial_number_ranging(self):
@@ -61,14 +61,14 @@ class TestAutoComplete(DirectoriesMixin, TestCase):
         )
         with self.assertLogs("paperless.index", level="ERROR") as cm:
             with mock.patch(
-                "documents.index.AsyncWriter.update_document",
-            ) as mocked_update_doc:
+                "documents.index.AsyncWriter.add_document",
+            ) as mocked_add_doc:
                 index.add_or_update_document(doc1)
 
-                mocked_update_doc.assert_called_once()
-                _, kwargs = mocked_update_doc.call_args
+                mocked_add_doc.assert_called_once()
+                indexed_doc = mocked_add_doc.call_args[0][0]
 
-                self.assertEqual(kwargs["asn"], 0)
+                self.assertEqual(indexed_doc["asn"], [0])
 
                 error_str = cm.output[0]
                 expected_str = "ERROR:paperless.index:Not indexing Archive Serial Number 4294967296 of document 1"
@@ -81,7 +81,7 @@ class TestAutoComplete(DirectoriesMixin, TestCase):
         WHEN:
             - Document is provided to the index
         THEN:
-            - ASN isn't touched
+            - ASN is set to 0 in the index
         """
         doc1 = Document.objects.create(
             title="doc1",
@@ -89,14 +89,14 @@ class TestAutoComplete(DirectoriesMixin, TestCase):
             content="test test2 test3",
         )
         with mock.patch(
-            "documents.index.AsyncWriter.update_document",
-        ) as mocked_update_doc:
+            "documents.index.AsyncWriter.add_document",
+        ) as mocked_add_doc:
             index.add_or_update_document(doc1)
 
-            mocked_update_doc.assert_called_once()
-            _, kwargs = mocked_update_doc.call_args
+            mocked_add_doc.assert_called_once()
+            indexed_doc = mocked_add_doc.call_args[0][0]
 
-            self.assertIsNone(kwargs["asn"])
+            self.assertEqual(indexed_doc["asn"], [0])
 
     @override_settings(TIME_ZONE="Pacific/Auckland")
     def test_added_today_respects_local_timezone_boundary(self):
