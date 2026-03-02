@@ -776,6 +776,17 @@ class DelayedQuery:
                 ),
             )
 
+        # Normalize scores relative to the global best match (only for relevance sort)
+        if self._sort_field is None and hits:
+            if not self.first_score:
+                # Fetch the top-1 result's score (offset=0) regardless of current page
+                top_result = self.searcher.search(q, limit=1)
+                if top_result.hits:
+                    self.first_score = top_result.hits[0][0]
+            if self.first_score:
+                for hit in hits:
+                    hit.score = hit.score / self.first_score
+
         page = SimplePage(results=hits, total=result.count)
         self.saved_results[start] = page
         return page
