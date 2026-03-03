@@ -152,28 +152,49 @@ def get_schema():
     return sb.build()
 
 
-def recreate_index_dir(path=index_dir):
-    if Path(path).exists():
-        rmtree(path)
+def create_index_dir(path=index_dir):
+    """Create the Tantivy index directory if it doesn't exist."""
     Path(path).mkdir(parents=True, exist_ok=True)
 
 
+def recreate_index_dir(path=index_dir):
+    """Clear the Tantivy index by deleting and recreating its directory."""
+    rmtree(path)
+    create_index_dir(path)
+
+
 @contextmanager
-def open_index(*, recreate=False, reload=True):
-    path = index_dir
-    if recreate or not Path(path).exists():
+def open_index(*, recreate=False, reload=True, path=index_dir):
+    import time as stime
+
+    if not Path(path).exists():
+        create_index_dir(path)
+    elif recreate:
         recreate_index_dir(path)
-    try:
-        index = tantivy.Index(schema=get_schema(), path=path)
-        index.register_tokenizer("bigram_analyzer", bigram_analyzer)
-        index.register_tokenizer("simple_analyzer", simple_analyzer)
-    except ValueError as e:
-        # Schema has changed
-        logger.warning(f"Recreating index due to error: {e}")
+    nb_attempts = 3
+    for attempt in range(nb_attempts):
+        try:
+            index = tantivy.Index(schema=get_schema(), path=path)
+            index.register_tokenizer("bigram_analyzer", bigram_analyzer)
+            index.register_tokenizer("simple_analyzer", simple_analyzer)
+            break
+        except ValueError as e:
+            logger.warning(f"Recreating index due to schema error: {e}")
+            recreate_index_dir(path)
+            index = tantivy.Index(schema=get_schema(), path=path)
+            break
+        except Exception as e:
+            logger.warning(
+                f"Error opening index (attempt {attempt + 1}/{nb_attempts}): {e}",
+            )
+            stime.sleep(0.1)
+    else:
+        logger.error(f"Failed to open index after {nb_attempts} attempts. Recreating.")
         recreate_index_dir(path)
         index = tantivy.Index(schema=get_schema(), path=path)
+
     if reload:
-        index.reload()  # Ensure we have the latest commit?
+        index.reload()
     yield index
 
 

@@ -1,7 +1,6 @@
 from datetime import datetime
 from unittest import mock
 
-from django.conf import settings
 from django.contrib.auth.models import User
 from django.test import SimpleTestCase
 from django.test import TestCase
@@ -279,48 +278,35 @@ class TestRewriteNaturalDateKeywords(SimpleTestCase):
 
 
 class TestIndexResilience(DirectoriesMixin, SimpleTestCase):
-    def _assert_recreate_called(self, mock_create_in):
-        mock_create_in.assert_called_once()
-        path_arg, schema_arg = mock_create_in.call_args.args
-        self.assertEqual(path_arg, settings.INDEX_DIR)
-        self.assertEqual(schema_arg.__class__.__name__, "Schema")
-
-    def test_transient_missing_segment_does_not_force_recreate(self):
+    def test_transient_error_retries_then_succeeds(self):
         """
         GIVEN:
             - Index directory exists
         WHEN:
             - open_index is called
-            - Opening the index raises FileNotFoundError once due to a
-              transient missing segment
+            - tantivy.Index raises OSError once, then succeeds
         THEN:
             - Index is opened successfully on retry
             - Index is not recreated
         """
-        file_marker = settings.INDEX_DIR / "file_marker.txt"
-        file_marker.write_text("keep")
-        expected_index = object()
+        expected_index = mock.MagicMock()
 
         with (
-            mock.patch("documents.index.exists_in", return_value=True),
+            self.assertLogs("paperless.index", level="WARNING") as cm,
             mock.patch(
-                "documents.index.open_dir",
-                side_effect=[FileNotFoundError("missing"), expected_index],
-            ) as mock_open_dir,
-            mock.patch(
-                "documents.index.create_in",
-            ) as mock_create_in,
-            mock.patch(
-                "documents.index.rmtree",
-            ) as mock_rmtree,
+                "documents.index.tantivy.Index",
+                side_effect=[OSError("busy"), expected_index],
+            ) as mock_index,
+            mock.patch("documents.index.recreate_index_dir") as mock_recreate,
         ):
-            ix = index.open_index()
+            with index.open_index() as ix:
+                self.assertIs(ix, expected_index)
 
-        self.assertIs(ix, expected_index)
-        self.assertGreaterEqual(mock_open_dir.call_count, 2)
-        mock_rmtree.assert_not_called()
-        mock_create_in.assert_not_called()
-        self.assertEqual(file_marker.read_text(), "keep")
+        self.assertEqual(mock_index.call_count, 2)
+        # recreate_index_dir is only called at the start if path doesn't exist
+        # but not as error recovery since retry succeeded
+        mock_recreate.assert_not_called()
+        self.assertIn("Error opening index (attempt 1/3)", cm.output[0])
 
     def test_transient_errors_exhaust_retries_and_recreate(self):
         """
@@ -328,68 +314,57 @@ class TestIndexResilience(DirectoriesMixin, SimpleTestCase):
             - Index directory exists
         WHEN:
             - open_index is called
-            - Opening the index raises FileNotFoundError multiple times due to
-              transient missing segments
+            - tantivy.Index always raises OSError
         THEN:
             - Index is recreated after retries are exhausted
         """
-        recreated_index = object()
+        recreated_index = mock.MagicMock()
 
         with (
             self.assertLogs("paperless.index", level="ERROR") as cm,
-            mock.patch("documents.index.exists_in", return_value=True),
             mock.patch(
-                "documents.index.open_dir",
-                side_effect=FileNotFoundError("missing"),
-            ) as mock_open_dir,
-            mock.patch("documents.index.rmtree") as mock_rmtree,
-            mock.patch(
-                "documents.index.create_in",
-                return_value=recreated_index,
-            ) as mock_create_in,
+                "documents.index.tantivy.Index",
+                side_effect=[
+                    OSError("busy"),
+                    OSError("busy"),
+                    OSError("busy"),
+                    recreated_index,
+                ],
+            ) as mock_index,
+            mock.patch("documents.index.recreate_index_dir") as mock_recreate,
         ):
-            ix = index.open_index()
+            with index.open_index() as ix:
+                self.assertIs(ix, recreated_index)
 
-        self.assertIs(ix, recreated_index)
-        self.assertEqual(mock_open_dir.call_count, 4)
-        mock_rmtree.assert_called_once_with(settings.INDEX_DIR)
-        self._assert_recreate_called(mock_create_in)
-        self.assertIn(
-            "Error while opening the index after retries, recreating.",
-            cm.output[0],
-        )
+        # 3 failed attempts + 1 final call after recreate
+        self.assertEqual(mock_index.call_count, 4)
+        mock_recreate.assert_called_once()
+        self.assertIn("Failed to open index after 3 attempts", cm.output[-1])
 
-    def test_non_transient_error_recreates_index(self):
+    def test_schema_error_recreates_immediately(self):
         """
         GIVEN:
             - Index directory exists
         WHEN:
             - open_index is called
-            - Opening the index raises a "non-transient" error
+            - tantivy.Index raises ValueError (schema mismatch)
         THEN:
-            - Index is recreated
+            - Index is recreated immediately without retries
         """
-        recreated_index = object()
+        recreated_index = mock.MagicMock()
 
         with (
-            self.assertLogs("paperless.index", level="ERROR") as cm,
-            mock.patch("documents.index.exists_in", return_value=True),
+            self.assertLogs("paperless.index", level="WARNING") as cm,
             mock.patch(
-                "documents.index.open_dir",
-                side_effect=RuntimeError("boom"),
-            ),
-            mock.patch("documents.index.rmtree") as mock_rmtree,
-            mock.patch(
-                "documents.index.create_in",
-                return_value=recreated_index,
-            ) as mock_create_in,
+                "documents.index.tantivy.Index",
+                side_effect=[ValueError("schema changed"), recreated_index],
+            ) as mock_index,
+            mock.patch("documents.index.recreate_index_dir") as mock_recreate,
         ):
-            ix = index.open_index()
+            with index.open_index() as ix:
+                self.assertIs(ix, recreated_index)
 
-        self.assertIs(ix, recreated_index)
-        mock_rmtree.assert_called_once_with(settings.INDEX_DIR)
-        self._assert_recreate_called(mock_create_in)
-        self.assertIn(
-            "Error while opening the index, recreating.",
-            cm.output[0],
-        )
+        # 1 failed attempt + 1 call after recreate = 2
+        self.assertEqual(mock_index.call_count, 2)
+        mock_recreate.assert_called_once()
+        self.assertIn("Recreating index due to schema error", cm.output[0])
