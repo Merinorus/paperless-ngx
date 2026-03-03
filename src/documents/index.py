@@ -916,7 +916,7 @@ def replace_date_expr(match, date_fields=DATE_FIELDS):
     try:
         start, end = parse_natural_date(expr)
     except Exception as e:
-        print(f"⚠️ parse_natural_date failed for {expr}: {e}")
+        logger.debug(f"parse_natural_date({expr}) failed: {e}")
         return match.group(0)
 
     # si parse_natural_date a renvoyé None
@@ -1078,18 +1078,18 @@ def extract_query_parts(query: str):
 class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
         q_str = self.query_params["query"]
-        print(f"raw query: {q_str}")
+        logger.debug(f"raw query: {q_str}")
         q_str = rewrite_natural_date_keywords(q_str)
-        print(f"with natural date keywords: {q_str}")
+        logger.debug(f"with natural date keywords: {q_str}")
         q_str = normalize_query(q_str)
-        print(f"normalized query: {q_str}")
+        logger.debug(f"normalized query: {q_str}")
 
         q_str = rewrite_default_and_keywords(q_str)
-        print(f"with default and keywords: {q_str}")
+        logger.debug(f"with default and keywords: {q_str}")
         q_str = preprocess_query_dates(q_str)
-        print(f"with dates: {q_str}")
+        logger.debug(f"with dates: {q_str}")
         text_terms = extract_query_parts(q_str)["text_terms"]
-        print(f"text terms: {text_terms}")
+        logger.debug(f"text terms: {text_terms}")
         if settings.ADVANCED_FUZZY_SEARCH_TRESHOLD and any(
             [len(t) >= settings.ADVANCED_FUZZY_SEARCH_TRESHOLD for t in text_terms],
         ):
@@ -1305,7 +1305,7 @@ def get_permissions_query(user: User | None, schema) -> tantivy.Query:
         return tantivy.Query.all_query()
 
     # Always return documents with no owner
-    queries = [tantivy.Query.term_query(schema, "has_owner", False)]
+    queries = [tantivy.Query.term_query(schema, "has_owner", field_value=False)]
 
     if user:
         user_id = str(user.id)
