@@ -8,6 +8,7 @@ import re
 import threading
 import unicodedata
 from contextlib import contextmanager
+from datetime import date
 from datetime import datetime
 from datetime import time
 from datetime import timedelta
@@ -1327,7 +1328,8 @@ def rewrite_natural_date_keywords(query_string: str) -> str:
 
             case "this month":
                 start = datetime(local_now.year, local_now.month, 1, 0, 0, 0, tzinfo=tz)
-                end = start + relativedelta(months=1) - timedelta(seconds=1)
+                last_day = (start + relativedelta(months=1) - timedelta(days=1)).date()
+                end = datetime.combine(last_day, time.max, tzinfo=tz)
 
             case "previous month":
                 this_month_start = datetime(
@@ -1340,11 +1342,16 @@ def rewrite_natural_date_keywords(query_string: str) -> str:
                     tzinfo=tz,
                 )
                 start = this_month_start - relativedelta(months=1)
-                end = this_month_start - timedelta(seconds=1)
+                last_day = (this_month_start - timedelta(days=1)).date()
+                end = datetime.combine(last_day, time.max, tzinfo=tz)
 
             case "this year":
                 start = datetime(local_now.year, 1, 1, 0, 0, 0, tzinfo=tz)
-                end = datetime(local_now.year, 12, 31, 23, 59, 59, tzinfo=tz)
+                end = datetime.combine(
+                    date(local_now.year, 12, 31),
+                    time.max,
+                    tzinfo=tz,
+                )
 
             case "previous week":
                 days_since_monday = local_now.weekday()
@@ -1354,7 +1361,8 @@ def rewrite_natural_date_keywords(query_string: str) -> str:
                     tzinfo=tz,
                 )
                 start = this_week_start - timedelta(days=7)
-                end = this_week_start - timedelta(seconds=1)
+                last_day = (this_week_start - timedelta(days=1)).date()
+                end = datetime.combine(last_day, time.max, tzinfo=tz)
 
             case "previous quarter":
                 current_quarter = (local_now.month - 1) // 3 + 1
@@ -1369,11 +1377,16 @@ def rewrite_natural_date_keywords(query_string: str) -> str:
                     tzinfo=tz,
                 )
                 start = this_quarter_start - relativedelta(months=3)
-                end = this_quarter_start - timedelta(seconds=1)
+                last_day = (this_quarter_start - timedelta(days=1)).date()
+                end = datetime.combine(last_day, time.max, tzinfo=tz)
 
             case "previous year":
                 start = datetime(local_now.year - 1, 1, 1, 0, 0, 0, tzinfo=tz)
-                end = datetime(local_now.year - 1, 12, 31, 23, 59, 59, tzinfo=tz)
+                end = datetime.combine(
+                    date(local_now.year - 1, 12, 31),
+                    time.max,
+                    tzinfo=tz,
+                )
 
         # Convert to UTC and format as RFC 3339 for Tantivy date fields
         start_str = start.astimezone(timezone.utc).isoformat()

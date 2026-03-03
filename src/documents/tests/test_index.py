@@ -160,44 +160,60 @@ class TestRewriteNaturalDateKeywords(SimpleTestCase):
             (
                 "added:today",
                 datetime(2025, 7, 20, 15, 30, 45, tzinfo=timezone.utc),
-                ("added:[20250720", "TO 20250720"),
+                (
+                    "added:[2025-07-20T00:00:00+00:00 TO 2025-07-20T23:59:59.999999+00:00]",
+                ),
             ),
             (
                 "added:yesterday",
                 datetime(2025, 7, 20, 15, 30, 45, tzinfo=timezone.utc),
-                ("added:[20250719", "TO 20250719"),
+                (
+                    "added:[2025-07-19T00:00:00+00:00 TO 2025-07-19T23:59:59.999999+00:00]",
+                ),
             ),
             (
                 "added:this month",
                 datetime(2025, 7, 15, 12, 0, 0, tzinfo=timezone.utc),
-                ("added:[20250701", "TO 20250731"),
+                (
+                    "added:[2025-07-01T00:00:00+00:00 TO 2025-07-31T23:59:59.999999+00:00]",
+                ),
             ),
             (
                 "added:previous month",
                 datetime(2025, 7, 15, 12, 0, 0, tzinfo=timezone.utc),
-                ("added:[20250601", "TO 20250630"),
+                (
+                    "added:[2025-06-01T00:00:00+00:00 TO 2025-06-30T23:59:59.999999+00:00]",
+                ),
             ),
             (
                 "added:this year",
                 datetime(2025, 7, 15, 12, 0, 0, tzinfo=timezone.utc),
-                ("added:[20250101", "TO 20251231"),
+                (
+                    "added:[2025-01-01T00:00:00+00:00 TO 2025-12-31T23:59:59.999999+00:00]",
+                ),
             ),
             (
                 "added:previous year",
                 datetime(2025, 7, 15, 12, 0, 0, tzinfo=timezone.utc),
-                ("added:[20240101", "TO 20241231"),
+                (
+                    "added:[2024-01-01T00:00:00+00:00 TO 2024-12-31T23:59:59.999999+00:00]",
+                ),
             ),
             # Previous quarter from July 15, 2025 is April-June.
             (
                 "added:previous quarter",
                 datetime(2025, 7, 15, 12, 0, 0, tzinfo=timezone.utc),
-                ("added:[20250401", "TO 20250630"),
+                (
+                    "added:[2025-04-01T00:00:00+00:00 TO 2025-06-30T23:59:59.999999+00:00]",
+                ),
             ),
             # July 20, 2025 is a Sunday (weekday 6) so previous week is July 7-13.
             (
                 "added:previous week",
                 datetime(2025, 7, 20, 12, 0, 0, tzinfo=timezone.utc),
-                ("added:[20250707", "TO 20250713"),
+                (
+                    "added:[2025-07-07T00:00:00+00:00 TO 2025-07-13T23:59:59.999999+00:00]",
+                ),
             ),
         ]
 
@@ -208,9 +224,13 @@ class TestRewriteNaturalDateKeywords(SimpleTestCase):
     def test_additional_fields(self):
         fixed_now = datetime(2025, 7, 20, 15, 30, 45, tzinfo=timezone.utc)
         # created
-        self._assert_rewrite_contains("created:today", fixed_now, "created:[20250720")
+        self._assert_rewrite_contains("created:today", fixed_now, "created:[2025-07-20")
         # modified
-        self._assert_rewrite_contains("modified:today", fixed_now, "modified:[20250720")
+        self._assert_rewrite_contains(
+            "modified:today",
+            fixed_now,
+            "modified:[2025-07-20",
+        )
 
     def test_basic_syntax_variants(self):
         """
@@ -221,18 +241,18 @@ class TestRewriteNaturalDateKeywords(SimpleTestCase):
         # quoted keywords
         result1 = self._rewrite_with_now('added:"today"', fixed_now)
         result2 = self._rewrite_with_now("added:'today'", fixed_now)
-        self.assertIn("added:[20250720", result1)
-        self.assertIn("added:[20250720", result2)
+        self.assertIn("added:[2025-07-20", result1)
+        self.assertIn("added:[2025-07-20", result2)
 
         # case insensitivity
         for query in ("added:TODAY", "added:Today", "added:ToDaY"):
             with self.subTest(case_variant=query):
-                self._assert_rewrite_contains(query, fixed_now, "added:[20250720")
+                self._assert_rewrite_contains(query, fixed_now, "added:[2025-07-20")
 
         # multiple clauses
         result = self._rewrite_with_now("added:today created:yesterday", fixed_now)
-        self.assertIn("added:[20250720", result)
-        self.assertIn("created:[20250719", result)
+        self.assertIn("added:[2025-07-20", result)
+        self.assertIn("created:[2025-07-19", result)
 
     def test_no_match(self):
         """
@@ -251,7 +271,11 @@ class TestRewriteNaturalDateKeywords(SimpleTestCase):
         fixed_now = datetime(2025, 7, 20, 1, 0, 0, tzinfo=get_current_timezone())
         result = self._rewrite_with_now("added:today", fixed_now)
         # Should convert to UTC properly
-        self.assertIn("added:[20250719", result)
+        # NZST is UTC+12, so "today" July 20 local = July 19 12:00 UTC to July 20 11:59:59 UTC
+        self.assertIn(
+            "added:[2025-07-19T12:00:00+00:00 TO 2025-07-20T11:59:59.999999+00:00]",
+            result,
+        )
 
 
 class TestIndexResilience(DirectoriesMixin, SimpleTestCase):
