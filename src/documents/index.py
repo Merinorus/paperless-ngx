@@ -346,9 +346,7 @@ def update_document(
         viewer_ids = [int(u.id) for u in users_with_perms]
 
     if not skip_delete:
-        writer.delete_documents_by_query(
-            tantivy.Query.term_query(get_schema(), "id", doc.pk),
-        )
+        remove_document(writer, doc)
     indexed_doc = tantivy.Document(
         id=doc.pk,
         title=doc.title or "",

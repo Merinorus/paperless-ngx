@@ -129,6 +129,30 @@ class TestAutoComplete(DirectoriesMixin, TestCase):
             results = response.json()["results"]
             self.assertEqual(len(results), 0)
 
+    def test_update_doc_replaces_previous_one(self):
+        """
+        GIVEN:
+            - Any document
+        WHEN:
+            - Document is added to the index
+        THEN:
+            - Any document with the same ID is removed from the index
+        """
+        doc1 = Document.objects.create(
+            id=123,
+            title="doc1",
+            checksum="A",
+            content="test test2 test3",
+        )
+        with mock.patch(
+            "documents.index.remove_document_by_id",
+        ) as mocked_remove_doc:
+            index.add_or_update_document(doc1)
+
+            mocked_remove_doc.assert_called_once()
+            doc_id = mocked_remove_doc.call_args[0][1]
+            self.assertEqual(doc_id, 123)
+
 
 @override_settings(TIME_ZONE="UTC")
 class TestRewriteNaturalDateKeywords(SimpleTestCase):

@@ -764,8 +764,10 @@ if os.getenv("PAPERLESS_DBENGINE") == "mariadb":
 DEFAULT_AUTO_FIELD = "django.db.models.AutoField"
 
 # Set to 0 to disable fuzzy search
-ADVANCED_FUZZY_SEARCH_TRESHOLD = __get_int("PAPERLESS_ADVANCED_FUZZY_SEARCH_TRESHOLD", 0)
-
+ADVANCED_FUZZY_SEARCH_TRESHOLD = __get_int(
+    "PAPERLESS_ADVANCED_FUZZY_SEARCH_TRESHOLD",
+    0,
+)
 ###############################################################################
 # Internationalization                                                        #
 ###############################################################################
