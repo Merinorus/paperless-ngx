@@ -96,7 +96,6 @@ def get_schema():
     sb.add_text_field(
         "title",
         stored=True,
-        index_option="basic",
         tokenizer_name="simple_analyzer",
     )
     sb.add_text_field("title_sort", fast=True, index_option="basic")
@@ -1073,28 +1072,41 @@ def extract_query_parts(query: str):
     return {"filters": filters, "text_terms": text_terms}
 
 
+def preprocess_query(query: str) -> tuple[str, list[str]]:
+    """
+    Preprocess a raw user query string before passing it to Tantivy's query parser.
+
+    Applies all rewrite steps in order:
+    1. rewrite_natural_date_keywords: today/yesterday/this month… → UTC ISO ranges
+    2. normalize_query: comma-separated parts → AND joins
+    3. preprocess_query_dates: remaining date expressions (Whoosh parser) → ISO ranges
+    4. extract_query_parts: extract free text terms (for fuzzy search decision)
+
+    Returns:
+        (rewritten_query, text_terms)
+    """
+    logger.debug(f"raw query: {query}")
+    query = rewrite_natural_date_keywords(query)
+    logger.debug(f"after natural date keywords: {query}")
+    query = normalize_query(query)
+    logger.debug(f"after normalize: {query}")
+    query = preprocess_query_dates(query)
+    logger.debug(f"after date preprocessing: {query}")
+    text_terms = extract_query_parts(query)["text_terms"]
+    logger.debug(f"text terms: {text_terms}")
+    return query, text_terms
+
+
 class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
-        q_str = self.query_params["query"]
-        logger.debug(f"raw query: {q_str}")
-        q_str = rewrite_natural_date_keywords(q_str)
-        logger.debug(f"with natural date keywords: {q_str}")
-        q_str = normalize_query(q_str)
-        logger.debug(f"normalized query: {q_str}")
+        q_str, text_terms = preprocess_query(self.query_params["query"])
 
-        q_str = rewrite_default_and_keywords(q_str)
-        logger.debug(f"with default and keywords: {q_str}")
-        q_str = preprocess_query_dates(q_str)
-        logger.debug(f"with dates: {q_str}")
-        text_terms = extract_query_parts(q_str)["text_terms"]
-        logger.debug(f"text terms: {text_terms}")
         if settings.ADVANCED_FUZZY_SEARCH_TRESHOLD and any(
             [len(t) >= settings.ADVANCED_FUZZY_SEARCH_TRESHOLD for t in text_terms],
         ):
             fuzzy_search = True
         else:
             fuzzy_search = False
-        # TODO: date parsing plugin like whoosh
 
         with open_index() as index:
             queries = list()
