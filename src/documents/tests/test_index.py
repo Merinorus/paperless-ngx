@@ -9,6 +9,8 @@ from django.utils.timezone import get_current_timezone
 from django.utils.timezone import timezone
 
 from documents import index
+from documents.index import normalize_query
+from documents.index import preprocess_query
 from documents.models import Document
 from documents.tests.utils import DirectoriesMixin
 
@@ -392,3 +394,399 @@ class TestIndexResilience(DirectoriesMixin, SimpleTestCase):
         self.assertEqual(mock_index.call_count, 2)
         mock_recreate.assert_called_once()
         self.assertIn("Recreating index due to schema error", cm.output[0])
+
+
+class TestNormalizeQuery(SimpleTestCase):
+    """normalize_query: comma-separated parts → AND joins."""
+
+    def test_single_term_no_comma(self):
+        self.assertEqual(normalize_query("invoice"), "(invoice)")
+
+    def test_comma_separated_free_text(self):
+        self.assertEqual(normalize_query("bank, statement"), "(bank statement)")
+
+    def test_comma_with_field_filter(self):
+        self.assertEqual(
+            normalize_query("bank statement, added:today"),
+            "(bank statement) AND added:today",
+        )
+
+    def test_multiple_field_filters(self):
+        self.assertEqual(
+            normalize_query("added:today, created:yesterday"),
+            "added:today AND created:yesterday",
+        )
+
+    def test_mixed_free_text_and_filters(self):
+        self.assertEqual(
+            normalize_query("invoice, tag:important, bank"),
+            "(invoice) AND tag:important AND (bank)",
+        )
+
+    def test_empty_string(self):
+        self.assertEqual(normalize_query(""), "")
+
+    def test_whitespace_parts_ignored(self):
+        self.assertEqual(normalize_query("test, , ,hello"), "(test hello)")
+
+
+class TestTantivyQueryParsing(DirectoriesMixin, SimpleTestCase):
+    """
+    Integration tests: verify that Tantivy's parse_query_lenient correctly
+    interprets boolean operators, phrases, ranges, field queries, and boosting.
+
+    Opens a real (empty) Tantivy index and inspects generated query structure.
+    """
+
+    default_fields = [
+        "content",
+        "title",
+        "correspondent",
+        "tag",
+        "type",
+        "notes",
+        "custom_fields",
+    ]
+
+    def _parse(self, query_str, *, conjunction_by_default=True):
+        with index.open_index() as ix:
+            return ix.parse_query_lenient(
+                query_str,
+                self.default_fields,
+                conjunction_by_default=conjunction_by_default,
+            )
+
+    def _parse_ok(self, query_str, **kwargs):
+        """Parse and assert no errors. Returns query string repr."""
+        query, errors = self._parse(query_str, **kwargs)
+        self.assertEqual(
+            errors,
+            [],
+            f"Unexpected parse errors for '{query_str}': {errors}",
+        )
+        return str(query)
+
+    def _parse_lenient(self, query_str, **kwargs):
+        """Parse and return query string repr, ignoring errors."""
+        query, _errors = self._parse(query_str, **kwargs)
+        return str(query)
+
+    # --- Structural checks (not covered by integration tests) ---
+
+    def test_conjunction_by_default(self):
+        and_result = self._parse_ok("bank AND statement")
+        default_result = self._parse_ok("bank statement")
+        self.assertEqual(and_result, default_result)
+
+    def test_or_produces_different_query_than_and(self):
+        and_result = self._parse_ok("bank AND statement")
+        or_result = self._parse_ok("bank OR statement")
+        self.assertNotEqual(and_result, or_result)
+
+    def test_phrase_different_from_and(self):
+        phrase = self._parse_ok('"bank statement"')
+        and_query = self._parse_ok("bank AND statement")
+        self.assertNotEqual(phrase, and_query)
+
+    def test_field_query_produces_term_query(self):
+        """A field-specific query should target a single field, not expand to all defaults."""
+        result = self._parse_ok("title:invoice")
+        self.assertIn("termquery", result.lower())
+
+    def test_field_query_different_from_free_text(self):
+        """title:invoice should differ from just 'invoice' (which expands to all fields)."""
+        field_result = self._parse_ok("title:invoice")
+        free_result = self._parse_ok("invoice")
+        self.assertNotEqual(field_result, free_result)
+
+    # --- Range and boost parsing (no indexed docs in integration tests) ---
+
+    def test_inclusive_range(self):
+        result = self._parse_lenient("title:[a TO z]")
+        self.assertIn("rangequery", result.lower())
+
+    def test_date_range(self):
+        result = self._parse_lenient(
+            "added:[2025-01-01T00:00:00+00:00 TO 2025-12-31T23:59:59+00:00]",
+        )
+        self.assertIn("2025-01-01", result)
+        self.assertIn("2025-12-31", result)
+        self.assertIn("date", result.lower())
+
+    def test_boost_term(self):
+        result = self._parse_ok("bank^2.0")
+        self.assertIn("bank", result.lower())
+        self.assertIn("2", result)
+
+    def test_boost_phrase(self):
+        result = self._parse_ok('"bank statement"^3.0')
+        self.assertIn("bank", result.lower())
+
+    # --- Edge cases (malformed input) ---
+
+    def test_empty_query(self):
+        result = self._parse_lenient("")
+        self.assertIsNotNone(result)
+
+    def test_special_chars_only(self):
+        result = self._parse_lenient("!!!")
+        self.assertIsNotNone(result)
+
+    def test_unbalanced_quotes_lenient(self):
+        result = self._parse_lenient('"bank statement')
+        self.assertIn("bank", result.lower())
+
+    def test_unknown_field_lenient(self):
+        result = self._parse_lenient("nonexistent_field:test")
+        self.assertIsNotNone(result)
+
+
+class TestPreprocessQuery(SimpleTestCase):
+    """
+    Unit tests for preprocess_query: the single entry point that chains
+    all rewrite steps before Tantivy parsing.
+    """
+
+    def test_plain_words_unchanged(self):
+        query = preprocess_query("bank statement")
+        self.assertIn("bank", query)
+        self.assertIn("statement", query)
+
+    def test_comma_joins_with_and(self):
+        query = preprocess_query("invoice, tag:important")
+        self.assertIn("AND", query)
+        self.assertIn("invoice", query)
+        self.assertIn("tag:important", query)
+
+    def test_explicit_or_preserved(self):
+        query = preprocess_query("bank OR statement")
+        self.assertIn("OR", query)
+
+    def test_explicit_not_preserved(self):
+        query = preprocess_query("bank NOT statement")
+        self.assertIn("NOT", query)
+
+    def test_phrases_preserved(self):
+        query = preprocess_query('"bank statement"')
+        self.assertIn('"bank statement"', query)
+
+    def test_mixed_comma_and_boolean(self):
+        query = preprocess_query("bank OR credit, tag:finance")
+        self.assertIn("bank", query)
+        self.assertIn("credit", query)
+        self.assertIn("tag:finance", query)
+        self.assertIn("AND", query)
+
+
+@override_settings(TIME_ZONE="UTC")
+class TestPreprocessQueryDates(SimpleTestCase):
+    """
+    Tests that preprocess_query correctly rewrites date expressions
+    (both natural keywords and Whoosh-style expressions) into Tantivy ISO ranges.
+    """
+
+    def _preprocess_with_now(self, query: str, now_dt: datetime) -> str:
+        with mock.patch("documents.index.now", return_value=now_dt):
+            return preprocess_query(query)
+
+    def test_today_keyword(self):
+        result = self._preprocess_with_now(
+            "added:today",
+            datetime(2025, 7, 20, 15, 0, 0, tzinfo=timezone.utc),
+        )
+        self.assertIn("added:[2025-07-20T00:00:00+00:00 TO 2025-07-20T23:59:59", result)
+
+    def test_yesterday_keyword(self):
+        result = self._preprocess_with_now(
+            "added:yesterday",
+            datetime(2025, 7, 20, 15, 0, 0, tzinfo=timezone.utc),
+        )
+        self.assertIn("added:[2025-07-19T00:00:00+00:00 TO 2025-07-19T23:59:59", result)
+
+    def test_date_keyword_with_free_text(self):
+        result = self._preprocess_with_now(
+            "invoice, added:today",
+            datetime(2025, 7, 20, 15, 0, 0, tzinfo=timezone.utc),
+        )
+        self.assertIn("invoice", result)
+        self.assertIn("added:[2025-07-20", result)
+        self.assertIn("AND", result)
+
+
+class TestTantivySearchIntegration(DirectoriesMixin, TestCase):
+    """
+    Integration tests that index real documents and verify that Tantivy
+    query syntax produces correct search results.
+
+    Covers: AND, OR, NOT, phrases, phrase slop (~N), field queries,
+    boosting, parentheses grouping.
+    """
+
+    default_fields = [
+        "content",
+        "title",
+        "correspondent",
+        "tag",
+        "type",
+        "notes",
+        "custom_fields",
+    ]
+
+    def setUp(self):
+        super().setUp()
+        self.d1 = Document.objects.create(
+            title="invoice from bank",
+            content="the quick brown fox jumps over the lazy dog",
+            checksum="int1",
+        )
+        self.d2 = Document.objects.create(
+            title="bank statement august",
+            content="monthly statement for credit card payment",
+            checksum="int2",
+        )
+        self.d3 = Document.objects.create(
+            title="tax return",
+            content="annual tax return filed with government agency",
+            checksum="int3",
+        )
+        self.d4 = Document.objects.create(
+            title="receipt from shop",
+            content="bought groceries and paid with credit card at the shop",
+            checksum="int4",
+        )
+        for doc in [self.d1, self.d2, self.d3, self.d4]:
+            index.add_or_update_document(doc)
+
+    def _search(self, query_str, *, conjunction_by_default=True):
+        """Search the index and return matching document PKs."""
+        q_str = preprocess_query(query_str)
+        with index.open_index() as ix:
+            query, _errors = ix.parse_query_lenient(
+                q_str,
+                self.default_fields,
+                conjunction_by_default=conjunction_by_default,
+            )
+            searcher = ix.searcher()
+            results = searcher.search(query, limit=100)
+            return {
+                searcher.doc(doc_addr)["id"][0] for _score, doc_addr in results.hits
+            }
+
+    # --- Single term ---
+
+    def test_single_term(self):
+        ids = self._search("bank")
+        self.assertIn(self.d1.pk, ids)
+        self.assertIn(self.d2.pk, ids)
+        self.assertNotIn(self.d3.pk, ids)
+
+    # --- AND (implicit via conjunction_by_default) ---
+
+    def test_implicit_and(self):
+        """'bank statement' with conjunction_by_default → both terms required."""
+        ids = self._search("bank statement")
+        self.assertIn(self.d2.pk, ids)  # has both in title
+        # d1 has 'bank' in title but not 'statement' in content or title
+        self.assertNotIn(self.d3.pk, ids)
+
+    def test_explicit_and(self):
+        ids = self._search("credit AND card")
+        self.assertIn(self.d2.pk, ids)
+        self.assertIn(self.d4.pk, ids)
+        self.assertNotIn(self.d1.pk, ids)
+
+    # --- OR ---
+
+    def test_explicit_or(self):
+        ids = self._search("tax OR bank")
+        self.assertIn(self.d1.pk, ids)  # bank
+        self.assertIn(self.d2.pk, ids)  # bank
+        self.assertIn(self.d3.pk, ids)  # tax
+        self.assertNotIn(self.d4.pk, ids)
+
+    # --- NOT / exclusion ---
+
+    def test_minus_exclusion(self):
+        ids = self._search("credit -shop")
+        self.assertIn(self.d2.pk, ids)  # credit, no shop
+        self.assertNotIn(self.d4.pk, ids)  # credit + shop
+
+    # --- Phrases ---
+
+    def test_phrase_match(self):
+        """Exact phrase 'brown fox' should match d1 only."""
+        ids = self._search('"brown fox"')
+        self.assertIn(self.d1.pk, ids)
+        self.assertEqual(len(ids), 1)
+
+    def test_phrase_no_match(self):
+        """'fox brown' (reversed) should not match as a phrase."""
+        ids = self._search('"fox brown"')
+        self.assertNotIn(self.d1.pk, ids)
+
+    # --- Phrase slop (word distance) ---
+
+    def test_phrase_slop(self):
+        """'quick fox'~2 should match d1 ('quick brown fox' — distance 1)."""
+        ids = self._search('"quick fox"~2')
+        self.assertIn(self.d1.pk, ids)
+
+    def test_phrase_slop_too_small(self):
+        """'quick lazy'~1 should NOT match d1 (distance is 4)."""
+        ids = self._search('"quick lazy"~1')
+        self.assertNotIn(self.d1.pk, ids)
+
+    # --- Field-specific queries ---
+
+    def test_field_title(self):
+        ids = self._search("title:invoice")
+        self.assertIn(self.d1.pk, ids)
+        self.assertNotIn(self.d2.pk, ids)
+
+    def test_field_content(self):
+        ids = self._search("content:groceries")
+        self.assertIn(self.d4.pk, ids)
+        self.assertEqual(len(ids), 1)
+
+    # --- Grouping with parentheses ---
+
+    def test_parentheses_grouping(self):
+        """(tax OR bank) -statement → tax return + invoice from bank."""
+        ids = self._search("(tax OR bank) -statement")
+        self.assertIn(self.d1.pk, ids)  # bank, no statement
+        self.assertIn(self.d3.pk, ids)  # tax, no statement
+        self.assertNotIn(self.d2.pk, ids)  # bank + statement
+
+    # --- Boosting ---
+
+    def test_boost_affects_ranking(self):
+        """'bank^10 OR tax' — bank docs should rank higher than tax docs."""
+        with index.open_index() as ix:
+            # Use parse_query_lenient directly to avoid preprocess_query wrapping
+            query, _ = ix.parse_query_lenient(
+                "bank^10 OR tax",
+                self.default_fields,
+                conjunction_by_default=False,
+            )
+            searcher = ix.searcher()
+            results = searcher.search(query, limit=100)
+            ranked_ids = [searcher.doc(addr)["id"][0] for _score, addr in results.hits]
+        # bank docs (d1, d2) should appear before tax doc (d3)
+        bank_positions = [ranked_ids.index(pk) for pk in [self.d1.pk, self.d2.pk]]
+        tax_position = ranked_ids.index(self.d3.pk)
+        self.assertTrue(all(bp < tax_position for bp in bank_positions))
+
+    # --- Plus (required) ---
+
+    def test_plus_required(self):
+        ids = self._search("+credit +shop")
+        self.assertIn(self.d4.pk, ids)
+        self.assertNotIn(self.d2.pk, ids)  # credit but no shop
+
+    # --- Complex combinations ---
+
+    def test_complex_query(self):
+        """title:bank AND (credit OR groceries) → d2 (bank+credit), not d4 (no bank in title)."""
+        ids = self._search("title:bank AND (credit OR groceries)")
+        self.assertIn(self.d2.pk, ids)
+        self.assertNotIn(self.d4.pk, ids)  # no 'bank' in title

@@ -101,30 +101,32 @@ def index_reindex(*, progress_bar_disable=False) -> None:
         "owner",
     ).order_by("pk")
 
-    with index.open_index_writer(recreate=True) as writer:
-        with tqdm.tqdm(total=total, disable=progress_bar_disable) as progress_bar:
-            last_pk = 0
-            while True:
-                chunk = list(base_qs.filter(pk__gt=last_pk)[:chunk_size])
-                if not chunk:
-                    break
+    with (
+        index.open_index_writer(recreate=True) as writer,
+        tqdm.tqdm(total=total, disable=progress_bar_disable) as progress_bar,
+    ):
+        last_pk = 0
+        while True:
+            chunk = list(base_qs.filter(pk__gt=last_pk)[:chunk_size])
+            if not chunk:
+                break
 
-                prefetch_related_objects(chunk, "tags", "notes", "custom_fields__field")
+            prefetch_related_objects(chunk, "tags", "notes", "custom_fields__field")
 
-                # Bulk-fetch permissions: 1 query per chunk instead of 1 per doc
-                chunk_pks = [doc.pk for doc in chunk]
-                viewer_map = _bulk_get_viewer_ids(chunk_pks)
+            # Bulk-fetch permissions: 1 query per chunk instead of 1 per doc
+            chunk_pks = [doc.pk for doc in chunk]
+            viewer_map = _bulk_get_viewer_ids(chunk_pks)
 
-                for document in chunk:
-                    index.update_document(
-                        writer,
-                        document,
-                        viewer_ids=viewer_map.get(document.pk, []),
-                        skip_delete=True,
-                    )
-                    progress_bar.update(1)
+            for document in chunk:
+                index.update_document(
+                    writer,
+                    document,
+                    viewer_ids=viewer_map.get(document.pk, []),
+                    skip_delete=True,
+                )
+                progress_bar.update(1)
 
-                last_pk = chunk[-1].pk
+            last_pk = chunk[-1].pk
 
 
 @shared_task

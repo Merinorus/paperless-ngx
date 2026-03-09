@@ -38,7 +38,6 @@ if TYPE_CHECKING:
     from whoosh.searching import ResultsPage
 
 logger = logging.getLogger("paperless.index")
-index_dir = f"{settings.INDEX_DIR}_tantivy"
 
 CJK_RE = re.compile(r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]+")
 WORD_RE = re.compile(r"\w+", flags=re.IGNORECASE)
@@ -151,21 +150,27 @@ def get_schema():
     return sb.build()
 
 
-def create_index_dir(path=index_dir):
+def _get_index_dir():
+    return f"{settings.INDEX_DIR}_tantivy"
+
+
+def create_index_dir(path=None):
     """Create the Tantivy index directory if it doesn't exist."""
-    Path(path).mkdir(parents=True, exist_ok=True)
+    Path(path or _get_index_dir()).mkdir(parents=True, exist_ok=True)
 
 
-def recreate_index_dir(path=index_dir):
+def recreate_index_dir(path=None):
     """Clear the Tantivy index by deleting and recreating its directory."""
+    path = path or _get_index_dir()
     rmtree(path)
     create_index_dir(path)
 
 
 @contextmanager
-def open_index(*, recreate=False, reload=True, path=index_dir):
+def open_index(*, recreate=False, reload=True, path=None):
     import time as stime
 
+    path = path or _get_index_dir()
     if not Path(path).exists():
         create_index_dir(path)
     elif recreate:
@@ -973,18 +978,6 @@ def preprocess_query_dates(query: str, date_fields=DATE_FIELDS) -> str:
 NQL_TOKENS = ["AND", "OR", "NOT", "TO", "+", "-", "(", ")", '"', "[", "]"]
 
 
-def rewrite_default_and_keywords(query_string: str) -> str:
-    """
-    Separate keywords by AND when natural query language isn't detected.
-    """
-    if not any(
-        [w in query_string for w in NQL_TOKENS],
-    ):
-        # No natural language detected, so separate by AND
-        query_string = re.sub(r"\s+", " AND ", query_string.strip())
-    return query_string
-
-
 # Known keywords in your search syntax
 KEYWORDS = [
     "content",
@@ -1080,10 +1073,9 @@ def preprocess_query(query: str) -> tuple[str, list[str]]:
     1. rewrite_natural_date_keywords: today/yesterday/this month… → UTC ISO ranges
     2. normalize_query: comma-separated parts → AND joins
     3. preprocess_query_dates: remaining date expressions (Whoosh parser) → ISO ranges
-    4. extract_query_parts: extract free text terms (for fuzzy search decision)
 
     Returns:
-        (rewritten_query, text_terms)
+        The rewritten query string, ready for Tantivy's parse_query_lenient.
     """
     logger.debug(f"raw query: {query}")
     query = rewrite_natural_date_keywords(query)
@@ -1092,17 +1084,18 @@ def preprocess_query(query: str) -> tuple[str, list[str]]:
     logger.debug(f"after normalize: {query}")
     query = preprocess_query_dates(query)
     logger.debug(f"after date preprocessing: {query}")
-    text_terms = extract_query_parts(query)["text_terms"]
-    logger.debug(f"text terms: {text_terms}")
-    return query, text_terms
+    return query
 
 
 class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
-        q_str, text_terms = preprocess_query(self.query_params["query"])
+        q_str = preprocess_query(self.query_params["query"])
 
         if settings.ADVANCED_FUZZY_SEARCH_TRESHOLD and any(
-            [len(t) >= settings.ADVANCED_FUZZY_SEARCH_TRESHOLD for t in text_terms],
+            [
+                len(t) >= settings.ADVANCED_FUZZY_SEARCH_TRESHOLD
+                for t in extract_query_parts(q_str)["text_terms"]
+            ],
         ):
             fuzzy_search = True
         else:
