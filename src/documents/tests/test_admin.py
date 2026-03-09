@@ -19,9 +19,16 @@ from paperless.admin import PaperlessUserAdmin
 
 class TestDocumentAdmin(DirectoriesMixin, TestCase):
     def get_document_from_index(self, doc):
-        ix = index.open_index()
-        with ix.searcher() as searcher:
-            return searcher.document(id=doc.id)
+        """Look up a document in the Tantivy index by its id. Returns the doc dict or None."""
+        import tantivy
+
+        with index.open_index() as ix:
+            searcher = ix.searcher()
+            query = tantivy.Query.term_query(index.get_schema(), "id", doc.id)
+            result = searcher.search(query, limit=1)
+            if result.hits:
+                return searcher.doc(result.hits[0][1])
+            return None
 
     def setUp(self) -> None:
         super().setUp()
@@ -33,7 +40,7 @@ class TestDocumentAdmin(DirectoriesMixin, TestCase):
         doc.title = "new title"
         self.doc_admin.save_model(None, doc, None, None)
         self.assertEqual(Document.objects.get(id=doc.id).title, "new title")
-        self.assertEqual(self.get_document_from_index(doc)["id"], doc.id)
+        self.assertEqual(self.get_document_from_index(doc)["id"][0], doc.id)
 
     def test_delete_model(self):
         doc = Document.objects.create(title="test")

@@ -11,7 +11,6 @@ from django.utils import timezone
 from guardian.shortcuts import assign_perm
 from rest_framework import status
 from rest_framework.test import APITestCase
-from whoosh.writing import AsyncWriter
 
 from documents import index
 from documents.bulk_edit import set_permissions
@@ -57,7 +56,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             checksum="C",
             original_filename="someepdf.pdf",
         )
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             # Note to future self: there is a reason we dont use a model signal handler to update the index: some operations edit many documents at once
             # (retagger, renamer) and we don't want to open a writer for each of these, but rather perform the entire operation with one writer.
             # That's why we can't open the writer in a model on_save handler or something.
@@ -125,7 +124,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             value_int=20,
         )
 
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             index.update_document(writer, d1)
             index.update_document(writer, d2)
             index.update_document(writer, d3)
@@ -149,7 +148,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         )
 
     def test_search_multi_page(self):
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             for i in range(55):
                 doc = Document.objects.create(
                     checksum=str(i),
@@ -184,7 +183,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             seen_ids.append(result["id"])
 
     def test_search_invalid_page(self):
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             for i in range(15):
                 doc = Document.objects.create(
                     checksum=str(i),
@@ -609,7 +608,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             owner=u1,
         )
 
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             index.update_document(writer, d1)
             index.update_document(writer, d2)
             index.update_document(writer, d3)
@@ -620,7 +619,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
 
         d3.owner = u2
 
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             index.update_document(writer, d3)
 
         response = self.client.get("/api/search/autocomplete/?term=app")
@@ -629,7 +628,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
 
         assign_perm("view_document", u1, d3)
 
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             index.update_document(writer, d3)
 
         response = self.client.get("/api/search/autocomplete/?term=app")
@@ -652,7 +651,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             checksum="1",
         )
 
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             index.update_document(writer, d1)
 
         response = self.client.get("/api/search/autocomplete/?term=created:2023")
@@ -674,7 +673,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             checksum="1",
         )
 
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             index.update_document(writer, d1)
 
         response = self.client.get("/api/search/autocomplete/?term=auto")
@@ -682,7 +681,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         self.assertEqual(response.data[0], b"auto")
 
     def test_search_spelling_suggestion(self):
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             for i in range(55):
                 doc = Document.objects.create(
                     checksum=str(i),
@@ -756,7 +755,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             pk=4,
             checksum="ABC",
         )
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             index.update_document(writer, d1)
             index.update_document(writer, d2)
             index.update_document(writer, d3)
@@ -835,7 +834,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             value_text="foobard4",
         )
 
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             for doc in Document.objects.all():
                 index.update_document(writer, doc)
 
@@ -1053,7 +1052,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         Document.objects.create(checksum="3", content="test 3", owner=u2)
         Document.objects.create(checksum="4", content="test 4")
 
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             for doc in Document.objects.all():
                 index.update_document(writer, doc)
 
@@ -1106,7 +1105,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         d3 = Document.objects.create(checksum="3", content="test 3", owner=u2)
         Document.objects.create(checksum="4", content="test 4")
 
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             for doc in Document.objects.all():
                 index.update_document(writer, doc)
 
@@ -1128,7 +1127,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         assign_perm("view_document", u1, d3)
         assign_perm("view_document", u2, d1)
 
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             for doc in [d1, d2, d3]:
                 index.update_document(writer, doc)
 
@@ -1193,7 +1192,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             user=u1,
         )
 
-        with AsyncWriter(index.open_index()) as writer:
+        with index.open_index_writer() as writer:
             for doc in Document.objects.all():
                 index.update_document(writer, doc)
 
