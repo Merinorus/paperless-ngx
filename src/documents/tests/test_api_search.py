@@ -1191,10 +1191,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
             document=d3,
             user=u1,
         )
-
-        with index.open_index_writer() as writer:
-            for doc in Document.objects.all():
-                index.update_document(writer, doc)
+        index.add_or_update_documents(Document.objects.all())
 
         def search_query(q):
             r = self.client.get("/api/documents/?query=test" + q)

@@ -12,6 +12,7 @@ from django.db.models import Case
 from django.db.models import CharField
 from django.db.models import Count
 from django.db.models import Exists
+from django.db.models import F
 from django.db.models import IntegerField
 from django.db.models import OuterRef
 from django.db.models import Q
@@ -843,6 +844,10 @@ class DocumentsOrderingFilter(OrderingFilter):
     field_name = "ordering"
     prefix = "custom_field_"
 
+    # Fields with nullable ForeignKeys need explicit NULLS LAST for
+    # consistent ordering across database backends (SQLite vs PostgreSQL).
+    _NULLABLE_FIELDS = {"owner"}
+
     def filter_queryset(self, request, queryset, view):
         param = request.query_params.get("ordering")
         if param and self.prefix in param:
@@ -976,5 +981,15 @@ class DocumentsOrderingFilter(OrderingFilter):
                 )
                 .distinct()
             )
+
+        if param:
+            field = param.lstrip("-")
+            if field in self._NULLABLE_FIELDS:
+                descending = param.startswith("-")
+                if descending:
+                    queryset = queryset.order_by(F(field).desc(nulls_first=True))
+                else:
+                    queryset = queryset.order_by(F(field).asc(nulls_last=True))
+                return queryset
 
         return super().filter_queryset(request, queryset, view)

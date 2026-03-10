@@ -6,7 +6,9 @@ import math
 import os
 import re
 import threading
+import time as stime
 import unicodedata
+from collections import Counter
 from contextlib import contextmanager
 from datetime import date
 from datetime import datetime
@@ -168,8 +170,6 @@ def recreate_index_dir(path=None):
 
 @contextmanager
 def open_index(*, recreate=False, reload=True, path=None):
-    import time as stime
-
     path = path or _get_index_dir()
     if not Path(path).exists():
         create_index_dir(path)
@@ -243,8 +243,6 @@ class AsyncWriter(threading.Thread):
                 writer = self.index.writer(**self.writerargs)
             except ValueError as e:
                 if self.LOCK_EXC_MSG in str(e):
-                    import time as stime
-
                     stime.sleep(self.delay)
                 else:
                     raise
@@ -602,9 +600,14 @@ class DelayedQuery:
         else:
             return sort_fields_map[field], reverse
 
+    # Text fields can't be sorted by Tantivy's order_by_field (it only works
+    # with numeric/date fast fields). These are routed through Django ORDER BY.
+    _TEXT_SORT_FIELDS = {"title", "correspondent__name", "document_type__name", "owner"}
+
     def _manual_sort_requested(self):
         ordering = self.query_params.get("ordering", "")
-        return ordering.lstrip("-").startswith("custom_field_")
+        field = ordering.lstrip("-")
+        return field.startswith("custom_field_") or field in self._TEXT_SORT_FIELDS
 
     def _manual_hits(self):
         if self._manual_hits_cache is not None:
@@ -692,7 +695,6 @@ class DelayedQuery:
         sortedby, reverse = self._get_query_sortedby()
         self._sort_field = sortedby
         self._sort_order = tantivy.Order.Desc if reverse else tantivy.Order.Asc
-
         # Handle "more like this" special case
         if isinstance(self, DelayedMoreLikeThisQuery) and sortedby not in [
             "score",
@@ -769,7 +771,6 @@ class DelayedQuery:
 
         start = item.start or 0
         page_size = (item.stop - start) if item.stop else self.page_size
-
         result = self.searcher.search(
             q,
             limit=page_size,
@@ -1220,13 +1221,12 @@ def autocomplete(
     user: User | None = None,
     *,
     fuzzy_search=False,
-) -> list[str]:
+) -> list[bytes]:
     """
     Returns autocomplete suggestions ranked by document frequency,
     matching the original Whoosh behavior: terms that appear in more
     documents are ranked higher. The exact match is always first.
     """
-    from collections import Counter
 
     if limit <= 0:
         return []
@@ -1292,14 +1292,19 @@ def autocomplete(
             merged_count[key] += count
 
         # Step 3: return best variant for each, ranked by merged count
-        result = [best_variant[key] for key, _ in merged_count.most_common(limit)]
+        # Tiebreaker: shortest first, then alphabetical (matches Whoosh behavior)
+        ranked = sorted(
+            merged_count.items(),
+            key=lambda kv: (-kv[1], len(kv[0]), kv[0]),
+        )[:limit]
+        result = [best_variant[key] for key, _ in ranked]
 
         # Bump the exact match to position 0 if present
         normalized_match = best_variant.get(normalized_term)
         if normalized_match and normalized_match in result:
             result.insert(0, result.pop(result.index(normalized_match)))
 
-        return result
+        return [word.encode("utf-8") for word in result]
 
 
 def get_permissions_query(user: User | None, schema) -> tantivy.Query:
