@@ -1155,17 +1155,25 @@ class DelayedFullTextQuery(DelayedQuery):
             q = tantivy.Query.boolean_query(
                 [(tantivy.Occur.Should, q) for q in queries],
             )
-            words = autocomplete(
-                index,
-                raw_query,
-                limit=1,
-                user=self.user,
-                fuzzy_search=True,
-            )
-            top_word = words[0].decode("utf-8") if words else None
-            suggested_correction = (
-                top_word if top_word and top_word != raw_query else None
-            )
+            try:
+                words = autocomplete(
+                    index,
+                    raw_query,
+                    limit=1,
+                    user=self.user,
+                    fuzzy_search=True,
+                )
+                top_word = words[0].decode("utf-8") if words else None
+                suggested_correction = (
+                    top_word if top_word and top_word != raw_query else None
+                )
+            except Exception as e:
+                suggested_correction = None
+                logger.info(
+                    "Error while correcting query %s: %s",
+                    f"{raw_query!r}",
+                    e,
+                )
 
         return q, suggested_correction
 

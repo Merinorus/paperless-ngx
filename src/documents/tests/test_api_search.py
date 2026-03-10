@@ -702,7 +702,7 @@ class TestDocumentSearchApi(DirectoriesMixin, APITestCase):
         self.assertEqual(correction, None)
 
     @mock.patch(
-        "whoosh.searching.Searcher.correct_query",
+        "documents.index.autocomplete",
         side_effect=Exception("Test error"),
     )
     def test_corrected_query_error(self, mock_correct_query):
