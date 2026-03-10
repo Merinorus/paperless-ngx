@@ -1090,7 +1090,8 @@ def preprocess_query(query: str) -> tuple[str, list[str]]:
 
 class DelayedFullTextQuery(DelayedQuery):
     def _get_query(self) -> tuple:
-        q_str = preprocess_query(self.query_params["query"])
+        raw_query = self.query_params["query"]
+        q_str = preprocess_query(raw_query)
 
         if settings.ADVANCED_FUZZY_SEARCH_TRESHOLD and any(
             [
@@ -1156,12 +1157,15 @@ class DelayedFullTextQuery(DelayedQuery):
             )
             words = autocomplete(
                 index,
-                q_str,
+                raw_query,
                 limit=1,
                 user=self.user,
                 fuzzy_search=True,
             )
-            suggested_correction = words[0] if words and words[0] != q_str else None
+            top_word = words[0].decode("utf-8") if words else None
+            suggested_correction = (
+                top_word if top_word and top_word != raw_query else None
+            )
 
         return q, suggested_correction
 
