@@ -32,7 +32,6 @@ from django.db.models import Count
 from django.db.models import IntegerField
 from django.db.models import Max
 from django.db.models import Model
-from django.db.models import Q
 from django.db.models import Sum
 from django.db.models import When
 from django.db.models.functions import Length
@@ -782,57 +781,76 @@ class DocumentViewSet(
     )
 
     def _get_selection_data_for_queryset(self, queryset):
-        correspondents = Correspondent.objects.annotate(
-            document_count=Count(
-                "documents",
-                filter=Q(documents__in=queryset),
-                distinct=True,
-            ),
+        # Use a clean queryset with only the filtered PKs to avoid
+        # existing annotations, ordering, and distinct leaking into
+        # the GROUP BY clause.
+        base_qs = Document.objects.filter(pk__in=queryset.values("pk"))
+
+        correspondents = (
+            base_qs.filter(
+                correspondent__isnull=False,
+            )
+            .values("correspondent_id")
+            .annotate(document_count=Count("id"))
         )
-        tags = Tag.objects.annotate(
-            document_count=Count(
-                "documents",
-                filter=Q(documents__in=queryset),
-                distinct=True,
-            ),
+
+        tags = (
+            base_qs.filter(
+                tags__isnull=False,
+            )
+            .values("tags__id")
+            .annotate(document_count=Count("id", distinct=True))
         )
-        document_types = DocumentType.objects.annotate(
-            document_count=Count(
-                "documents",
-                filter=Q(documents__in=queryset),
-                distinct=True,
-            ),
+
+        document_types = (
+            base_qs.filter(
+                document_type__isnull=False,
+            )
+            .values("document_type_id")
+            .annotate(document_count=Count("id"))
         )
-        storage_paths = StoragePath.objects.annotate(
-            document_count=Count(
-                "documents",
-                filter=Q(documents__in=queryset),
-                distinct=True,
-            ),
+
+        storage_paths = (
+            base_qs.filter(
+                storage_path__isnull=False,
+            )
+            .values("storage_path_id")
+            .annotate(document_count=Count("id"))
         )
-        custom_fields = CustomField.objects.annotate(
-            document_count=Count(
-                "fields__document",
-                filter=Q(fields__document__in=queryset),
-                distinct=True,
-            ),
+
+        custom_fields = (
+            base_qs.filter(
+                custom_fields__isnull=False,
+            )
+            .values("custom_fields__field_id")
+            .annotate(
+                document_count=Count("id", distinct=True),
+            )
         )
 
         return {
             "selected_correspondents": [
-                {"id": t.id, "document_count": t.document_count} for t in correspondents
+                {"id": row["correspondent_id"], "document_count": row["document_count"]}
+                for row in correspondents
             ],
             "selected_tags": [
-                {"id": t.id, "document_count": t.document_count} for t in tags
+                {"id": row["tags__id"], "document_count": row["document_count"]}
+                for row in tags
             ],
             "selected_document_types": [
-                {"id": t.id, "document_count": t.document_count} for t in document_types
+                {"id": row["document_type_id"], "document_count": row["document_count"]}
+                for row in document_types
             ],
             "selected_storage_paths": [
-                {"id": t.id, "document_count": t.document_count} for t in storage_paths
+                {"id": row["storage_path_id"], "document_count": row["document_count"]}
+                for row in storage_paths
             ],
             "selected_custom_fields": [
-                {"id": t.id, "document_count": t.document_count} for t in custom_fields
+                {
+                    "id": row["custom_fields__field_id"],
+                    "document_count": row["document_count"],
+                }
+                for row in custom_fields
             ],
         }
 
