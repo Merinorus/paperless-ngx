@@ -151,8 +151,7 @@ class TestSystemStatus(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.data["tasks"]["celery_status"], "OK")
 
-    @override_settings(INDEX_DIR=Path("/tmp/index"))
-    @mock.patch("whoosh.index.FileIndex.last_modified")
+    @mock.patch("documents.index.get_index_last_modified")
     def test_system_status_index_ok(self, mock_last_modified):
         """
         GIVEN:

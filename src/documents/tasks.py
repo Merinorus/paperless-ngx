@@ -18,7 +18,6 @@ from django.db.models import prefetch_related_objects
 from django.db.models.signals import post_save
 from django.utils import timezone
 from filelock import FileLock
-from whoosh.writing import AsyncWriter
 
 from documents import index
 from documents import sanity_checker
@@ -63,9 +62,11 @@ logger = logging.getLogger("paperless.tasks")
 
 @shared_task
 def index_optimize():
-    ix = index.open_index()
-    writer = AsyncWriter(ix)
-    writer.commit(optimize=True)
+    # Currently the Tantivy Python binder doesn't allow to change merge policy.
+    # So this is currently a no-op and my even be removed in the future.
+    # See https://tantivy-py.readthedocs.io/en/latest/explanation/#merge-policy
+    # See also https://fulmicoton.com/posts/behold-tantivy-part2/
+    logger.info("Index is already optimized. Nothing to do.")
 
 
 def _bulk_get_viewer_ids(doc_pks):
@@ -279,8 +280,6 @@ def sanity_check(*, scheduled=True, raise_on_error=True):
 def bulk_update_documents(document_ids):
     documents = Document.objects.filter(id__in=document_ids)
 
-    ix = index.open_index()
-
     for doc in documents:
         clear_document_caches(doc.pk)
         document_updated.send(
@@ -290,7 +289,7 @@ def bulk_update_documents(document_ids):
         )
         post_save.send(Document, instance=doc, created=False)
 
-    with AsyncWriter(ix) as writer:
+    with index.open_index_writer() as writer:
         for doc in documents:
             index.update_document(writer, doc)
 

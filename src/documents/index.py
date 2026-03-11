@@ -161,6 +161,14 @@ def create_index_dir(path=None):
     Path(path or _get_index_dir()).mkdir(parents=True, exist_ok=True)
 
 
+def get_index_last_modified() -> float | None:
+    """Return the mtime of the Tantivy meta.json, or None if it doesn't exist."""
+    meta_path = Path(_get_index_dir()) / "meta.json"
+    if meta_path.exists():
+        return meta_path.stat().st_mtime
+    return None
+
+
 def recreate_index_dir(path=None):
     """Clear the Tantivy index by deleting and recreating its directory."""
     path = path or _get_index_dir()

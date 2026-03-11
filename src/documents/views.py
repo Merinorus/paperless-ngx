@@ -3055,10 +3055,9 @@ class SystemStatusView(PassUserMixin):
 
         index_error = None
         try:
-            ix = index.open_index()
             index_status = "OK"
             index_last_modified = make_aware(
-                datetime.fromtimestamp(ix.last_modified()),
+                datetime.fromtimestamp(index.get_index_last_modified()),
             )
         except Exception as e:
             index_status = "ERROR"
