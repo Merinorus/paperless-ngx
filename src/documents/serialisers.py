@@ -103,6 +103,7 @@ class DynamicFieldsModelSerializer(serializers.ModelSerializer):
         # Instantiate the superclass normally
         super().__init__(*args, **kwargs)
 
+        self._dynamic_fields_restricted = fields is not None
         if fields is not None:
             # Drop any fields that are not specified in the `fields` argument.
             allowed = set(fields)
@@ -1313,14 +1314,15 @@ class SearchResultSerializer(DocumentSerializer):
             [str(c.note) for c in document.notes.all()],
         )
         r = super().to_representation(document)
-        r["__search_hit__"] = {
-            "score": hit.score,
-            "highlights": hit.highlights("content", text=document.content),
-            "note_highlights": (
-                hit.highlights("notes", text=notes) if document else None
-            ),
-            "rank": hit.rank,
-        }
+        if not self._dynamic_fields_restricted:
+            r["__search_hit__"] = {
+                "score": hit.score,
+                "highlights": hit.highlights("content", text=document.content),
+                "note_highlights": (
+                    hit.highlights("notes", text=notes) if document else None
+                ),
+                "rank": hit.rank,
+            }
 
         return r
 

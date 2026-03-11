@@ -855,10 +855,34 @@ class DocumentViewSet(
         }
 
     def get_queryset(self):
+        qs = Document.objects.distinct().order_by("-created")
+
+        fields_param = self.request.query_params.get("fields", None)
+        if fields_param is not None:
+            requested = set(fields_param.split(","))
+            model_field_names = {f.name for f in Document._meta.get_fields()}
+            # Always include "created": .distinct() + .order_by("-created")
+            # forces it into SELECT, and .only() must match or from_db() crashes.
+            qs = qs.only(
+                *(requested & model_field_names | {"id", "deleted_at", "created"}),
+            )
+            if requested & {"notes", "num_notes"}:
+                qs = qs.annotate(num_notes=Count("notes"))
+            prefetches = {"tags", "custom_fields", "notes"} & requested
+            if prefetches:
+                qs = qs.prefetch_related(*prefetches)
+            selects = {
+                "correspondent",
+                "document_type",
+                "storage_path",
+                "owner",
+            } & requested
+            if selects:
+                qs = qs.select_related(*selects)
+            return qs
+
         return (
-            Document.objects.distinct()
-            .order_by("-created")
-            .annotate(num_notes=Count("notes"))
+            qs.annotate(num_notes=Count("notes"))
             .select_related("correspondent", "storage_path", "document_type", "owner")
             .prefetch_related("tags", "custom_fields", "notes")
         )
