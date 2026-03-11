@@ -1488,7 +1488,10 @@ class UnifiedSearchViewSet(DocumentViewSet):
                             ),
                         ),
                     ):
-                        result_ids = response.data.get("all", [])
+                        result_ids = response.data.get(
+                            "all",
+                            self.paginator.get_all_result_ids(),
+                        )
                         response.data["selection_data"] = (
                             self._get_selection_data_for_queryset(
                                 Document.objects.filter(pk__in=result_ids),

@@ -183,6 +183,7 @@ export class DocumentService extends AbstractPaperlessService<Document> {
   listAllFilteredIds(filterRules?: FilterRule[]): Observable<number[]> {
     return this.listFiltered(1, 100000, null, null, filterRules, {
       fields: 'id',
+      include_all: false,
     }).pipe(map((response) => response.results.map((doc) => doc.id)))
   }
 

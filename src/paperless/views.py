@@ -35,6 +35,7 @@ from rest_framework.viewsets import ModelViewSet
 
 from documents.index import DelayedQuery
 from documents.permissions import PaperlessObjectPermissions
+from documents.utils import get_boolean
 from paperless.filters import GroupFilterSet
 from paperless.filters import UserFilterSet
 from paperless.models import ApplicationConfiguration
@@ -55,17 +56,22 @@ class StandardPagination(PageNumberPagination):
     max_page_size = 100000
 
     def get_paginated_response(self, data):
-        return Response(
-            OrderedDict(
-                [
-                    ("count", self.page.paginator.count),
-                    ("next", self.get_next_link()),
-                    ("previous", self.get_previous_link()),
-                    ("all", self.get_all_result_ids()),
-                    ("results", data),
-                ],
+        include_all = get_boolean(
+            str(
+                self.request.query_params.get("include_all", "true"),
             ),
         )
+        result = OrderedDict(
+            [
+                ("count", self.page.paginator.count),
+                ("next", self.get_next_link()),
+                ("previous", self.get_previous_link()),
+                ("results", data),
+            ],
+        )
+        if include_all:
+            result["all"] = self.get_all_result_ids()
+        return Response(result)
 
     def get_all_result_ids(self):
         query = self.page.paginator.object_list

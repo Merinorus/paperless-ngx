@@ -261,7 +261,11 @@ export class DocumentListViewService {
         activeListViewState.sortField,
         activeListViewState.sortReverse,
         activeListViewState.filterRules,
-        { truncate_content: true, include_selection_data: true }
+        {
+          truncate_content: true,
+          include_selection_data: true,
+          include_all: false,
+        }
       )
       .pipe(takeUntil(this.unsubscribeNotifier))
       .subscribe({
