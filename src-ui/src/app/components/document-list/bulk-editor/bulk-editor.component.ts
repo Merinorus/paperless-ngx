@@ -16,6 +16,7 @@ import { first, map, Subject, switchMap, takeUntil } from 'rxjs'
 import { ConfirmDialogComponent } from 'src/app/components/common/confirm-dialog/confirm-dialog.component'
 import { CustomField } from 'src/app/data/custom-field'
 import { MatchingModel } from 'src/app/data/matching-model'
+import { SelectionDataItem } from 'src/app/data/results'
 import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
 import { IfPermissionsDirective } from 'src/app/directives/if-permissions.directive'
 import { DocumentListViewService } from 'src/app/services/document-list-view.service'
@@ -28,10 +29,7 @@ import {
 import { CorrespondentService } from 'src/app/services/rest/correspondent.service'
 import { CustomFieldsService } from 'src/app/services/rest/custom-fields.service'
 import { DocumentTypeService } from 'src/app/services/rest/document-type.service'
-import {
-  DocumentService,
-  SelectionDataItem,
-} from 'src/app/services/rest/document.service'
+import { DocumentService } from 'src/app/services/rest/document.service'
 import { SavedViewService } from 'src/app/services/rest/saved-view.service'
 import { StoragePathService } from 'src/app/services/rest/storage-path.service'
 import { TagService } from 'src/app/services/rest/tag.service'
