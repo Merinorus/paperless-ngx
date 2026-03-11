@@ -164,7 +164,7 @@ def create_index_dir(path=None):
 def recreate_index_dir(path=None):
     """Clear the Tantivy index by deleting and recreating its directory."""
     path = path or _get_index_dir()
-    rmtree(path)
+    rmtree(path, ignore_errors=True)
     create_index_dir(path)
 
 
