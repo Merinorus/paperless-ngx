@@ -20,7 +20,6 @@ from django.contrib.contenttypes.models import ContentType
 from django.core import serializers
 from django.core.management.base import BaseCommand
 from django.core.management.base import CommandError
-from django.db import transaction
 from django.utils import timezone
 from filelock import FileLock
 from guardian.models import GroupObjectPermission
@@ -60,6 +59,28 @@ from paperless.db import GnuPG
 from paperless.models import ApplicationConfiguration
 from paperless_mail.models import MailAccount
 from paperless_mail.models import MailRule
+
+_CHUNK_SIZE = 100
+
+
+class _JsonArrayWriter:
+    """Incrementally writes a JSON array to a file without buffering all items."""
+
+    def __init__(self, file):
+        self._file = file
+        self._first = True
+        self._file.write("[")
+
+    def write_item(self, item):
+        if self._first:
+            self._file.write("\n")
+            self._first = False
+        else:
+            self._file.write(",\n")
+        json.dump(item, self._file, indent=2, ensure_ascii=False)
+
+    def close(self):
+        self._file.write("\n]\n")
 
 
 class Command(CryptMixin, BaseCommand):
@@ -252,9 +273,27 @@ class Command(CryptMixin, BaseCommand):
             if x.is_file():
                 self.files_in_export_dir.add(x.resolve())
 
-        # 2. Create manifest, containing all correspondents, types, tags, storage paths
-        # note, documents and ui_settings
-        manifest_key_to_object_query: dict[str, QuerySet] = {
+        # 2. Setup encryption once if needed
+        if self.passphrase:
+            self.setup_crypto(passphrase=self.passphrase)
+        elif MailAccount.objects.count() > 0 or SocialToken.objects.count() > 0:
+            self.stdout.write(
+                self.style.NOTICE(
+                    "No passphrase was given, sensitive fields will be in plaintext",
+                ),
+            )
+
+        # Build a lookup for fields that need encryption
+        crypt_field_lookup: dict[str, list[str]] = {}
+        if self.passphrase:
+            for crypt_config in self.CRYPT_FIELDS:
+                crypt_field_lookup[crypt_config["exporter_key"]] = crypt_config[
+                    "fields"
+                ]
+
+        # 3. Define all querysets to export.
+        # All are processed in chunks of _CHUNK_SIZE to bound memory usage.
+        querysets: dict[str, QuerySet] = {
             "correspondents": Correspondent.objects.all(),
             "tags": Tag.objects.all(),
             "document_types": DocumentType.objects.all(),
@@ -281,7 +320,14 @@ class Command(CryptMixin, BaseCommand):
             "custom_field_instances": CustomFieldInstance.objects.all(),
             "app_configs": ApplicationConfiguration.objects.all(),
             "notes": Note.objects.all(),
-            "documents": Document.objects.order_by("id").all(),
+            "documents": Document.objects.select_related(
+                "correspondent",
+                "document_type",
+                "storage_path",
+                "owner",
+            )
+            .prefetch_related("tags")
+            .order_by("id"),
             "social_accounts": SocialAccount.objects.all(),
             "social_apps": SocialApp.objects.all(),
             "social_tokens": SocialToken.objects.all(),
@@ -289,129 +335,209 @@ class Command(CryptMixin, BaseCommand):
         }
 
         if settings.AUDIT_LOG_ENABLED:
-            manifest_key_to_object_query["log_entries"] = LogEntry.objects.all()
+            querysets["log_entries"] = LogEntry.objects.all()
 
-        with transaction.atomic():
-            manifest_dict = {}
-
-            # Build an overall manifest
-            for key, object_query in manifest_key_to_object_query.items():
-                manifest_dict[key] = json.loads(
-                    serializers.serialize("json", object_query),
-                )
-
-            self.encrypt_secret_fields(manifest_dict)
-
-            # These are treated specially and included in the per-document manifest
-            # if that setting is enabled.  Otherwise, they are just exported to the bulk
-            # manifest
-            document_map: dict[int, Document] = {
-                d.pk: d for d in manifest_key_to_object_query["documents"]
-            }
-            document_manifest = manifest_dict["documents"]
-
-        # 3. Export files from each document
-        for index, document_dict in tqdm.tqdm(
-            enumerate(document_manifest),
-            total=len(document_manifest),
-            disable=self.no_progress_bar,
-        ):
-            # 3.1. store files unencrypted
-            document_dict["fields"]["storage_type"] = Document.STORAGE_TYPE_UNENCRYPTED
-
-            document = document_map[document_dict["pk"]]
-
-            # 3.2. generate a unique filename
-            base_name = self.generate_base_name(document)
-
-            # 3.3. write filenames into manifest
-            original_target, thumbnail_target, archive_target = (
-                self.generate_document_targets(document, base_name, document_dict)
-            )
-
-            # 3.4. write files to target folder
-            if not self.data_only:
-                self.copy_document_files(
-                    document,
-                    original_target,
-                    thumbnail_target,
-                    archive_target,
-                )
-
-            if self.split_manifest:
-                manifest_name = base_name.with_name(f"{base_name.stem}-manifest.json")
-                if self.use_folder_prefix:
-                    manifest_name = Path("json") / manifest_name
-                manifest_name = (self.target / manifest_name).resolve()
-                manifest_name.parent.mkdir(parents=True, exist_ok=True)
-                content = [document_manifest[index]]
-                content += list(
-                    filter(
-                        lambda d: d["fields"]["document"] == document_dict["pk"],
-                        manifest_dict["notes"],
-                    ),
-                )
-                content += list(
-                    filter(
-                        lambda d: d["fields"]["document"] == document_dict["pk"],
-                        manifest_dict["custom_field_instances"],
-                    ),
-                )
-
-                self.check_and_write_json(
-                    content,
-                    manifest_name,
-                )
-
-        # These were exported already
-        if self.split_manifest:
-            del manifest_dict["documents"]
-            del manifest_dict["notes"]
-            del manifest_dict["custom_field_instances"]
-
-        # 4.1 write primary manifest to target folder
-        manifest = []
-        for key, item in manifest_dict.items():
-            manifest.extend(item)
+        # 4. Stream manifest.json, processing everything in chunks
         manifest_path = (self.target / "manifest.json").resolve()
-        self.check_and_write_json(
-            manifest,
-            manifest_path,
-        )
+        manifest_was_existing = manifest_path in self.files_in_export_dir
+        if manifest_was_existing:
+            self.files_in_export_dir.remove(manifest_path)
 
-        # 4.2 write version information to target folder
+        tmp_manifest = manifest_path.with_suffix(".tmp")
+        try:
+            with Path.open(tmp_manifest, "w", encoding="utf-8") as f:
+                writer = _JsonArrayWriter(f)
+
+                for key, qs in querysets.items():
+                    if key == "documents":
+                        self._export_documents_chunked(qs, writer)
+                    elif (
+                        key in ("notes", "custom_field_instances")
+                        and self.split_manifest
+                    ):
+                        # In split mode these are written per-document
+                        # in _export_documents_chunked, skip them here
+                        pass
+                    else:
+                        self._export_queryset_chunked(
+                            key,
+                            qs,
+                            writer,
+                            crypt_field_lookup,
+                        )
+                writer.close()
+
+            self._finalize_manifest(
+                tmp_manifest,
+                manifest_path,
+                manifest_was_existing,
+            )
+        finally:
+            if tmp_manifest.exists():
+                tmp_manifest.unlink()
+
+        # 5. Write version information to target folder
         extra_metadata_path = (self.target / "metadata.json").resolve()
         metadata: dict[str, str | int | dict[str, str | int]] = {
             "version": version.__full_version_str__,
         }
-
-        # 4.2.1 If needed, write the crypto values into the metadata
-        # Django stores most of these in the field itself, we store them once here
         if self.passphrase:
             metadata.update(self.get_crypt_params())
+        self.check_and_write_json(metadata, extra_metadata_path)
 
-        self.check_and_write_json(
-            metadata,
-            extra_metadata_path,
-        )
-
+        # 6. Remove files which we did not explicitly export in this run
         if self.delete:
-            # 5. Remove files which we did not explicitly export in this run
             if not self.zip_export:
                 for f in self.files_in_export_dir:
                     f.unlink()
-
-                    delete_empty_directories(
-                        f.parent,
-                        self.target,
-                    )
+                    delete_empty_directories(f.parent, self.target)
             else:
-                # 5. Remove anything in the original location (before moving the zip)
                 for item in self.original_target.glob("*"):
                     if item.is_dir():
                         shutil.rmtree(item)
                     else:
                         item.unlink()
+
+    def _export_queryset_chunked(
+        self,
+        key: str,
+        qs: "QuerySet",
+        writer: _JsonArrayWriter,
+        crypt_field_lookup: dict[str, list[str]],
+    ) -> None:
+        """Serialize a queryset in chunks and stream items to the manifest writer."""
+        crypt_fields = crypt_field_lookup.get(key)
+        last_pk = 0
+        while True:
+            chunk = list(
+                qs.filter(pk__gt=last_pk).order_by("pk")[:_CHUNK_SIZE],
+            )
+            if not chunk:
+                break
+            last_pk = chunk[-1].pk
+
+            serialized = json.loads(serializers.serialize("json", chunk))
+
+            if crypt_fields:
+                for record in serialized:
+                    for field in crypt_fields:
+                        if record["fields"][field]:
+                            record["fields"][field] = self.encrypt_string(
+                                value=record["fields"][field],
+                            )
+
+            for item in serialized:
+                writer.write_item(item)
+
+    def _export_documents_chunked(
+        self,
+        doc_qs: "QuerySet",
+        writer: _JsonArrayWriter,
+    ) -> None:
+        """Export documents in chunks: serialize, copy files, write to manifest."""
+        total_docs = doc_qs.count()
+        split = self.split_manifest
+
+        with tqdm.tqdm(total=total_docs, disable=self.no_progress_bar) as progress:
+            last_pk = 0
+            while True:
+                chunk_docs = list(
+                    doc_qs.filter(pk__gt=last_pk).order_by("pk")[:_CHUNK_SIZE],
+                )
+                if not chunk_docs:
+                    break
+                last_pk = chunk_docs[-1].pk
+
+                chunk_serialized = json.loads(
+                    serializers.serialize("json", chunk_docs),
+                )
+                chunk_doc_map = {d.pk: d for d in chunk_docs}
+
+                chunk_notes = None
+                chunk_cfi = None
+                if split:
+                    chunk_pks = list(chunk_doc_map.keys())
+                    chunk_notes = json.loads(
+                        serializers.serialize(
+                            "json",
+                            Note.objects.filter(document_id__in=chunk_pks),
+                        ),
+                    )
+                    chunk_cfi = json.loads(
+                        serializers.serialize(
+                            "json",
+                            CustomFieldInstance.objects.filter(
+                                document_id__in=chunk_pks,
+                            ),
+                        ),
+                    )
+
+                for document_dict in chunk_serialized:
+                    document_dict["fields"]["storage_type"] = (
+                        Document.STORAGE_TYPE_UNENCRYPTED
+                    )
+                    document = chunk_doc_map[document_dict["pk"]]
+
+                    base_name = self.generate_base_name(document)
+
+                    original_target, thumbnail_target, archive_target = (
+                        self.generate_document_targets(
+                            document,
+                            base_name,
+                            document_dict,
+                        )
+                    )
+
+                    if not self.data_only:
+                        self.copy_document_files(
+                            document,
+                            original_target,
+                            thumbnail_target,
+                            archive_target,
+                        )
+
+                    if split:
+                        manifest_name = base_name.with_name(
+                            f"{base_name.stem}-manifest.json",
+                        )
+                        if self.use_folder_prefix:
+                            manifest_name = Path("json") / manifest_name
+                        manifest_name = (self.target / manifest_name).resolve()
+                        manifest_name.parent.mkdir(
+                            parents=True,
+                            exist_ok=True,
+                        )
+                        content = [document_dict]
+                        content += [
+                            n
+                            for n in chunk_notes
+                            if n["fields"]["document"] == document_dict["pk"]
+                        ]
+                        content += [
+                            c
+                            for c in chunk_cfi
+                            if c["fields"]["document"] == document_dict["pk"]
+                        ]
+                        self.check_and_write_json(content, manifest_name)
+                    else:
+                        writer.write_item(document_dict)
+
+                progress.update(len(chunk_serialized))
+
+    def _finalize_manifest(
+        self,
+        tmp_path: Path,
+        final_path: Path,
+        *,
+        was_existing: bool,
+    ) -> None:
+        """Move temp manifest to final location, respecting --compare-json."""
+        if was_existing and self.compare_json:
+            old_checksum = hashlib.md5(final_path.read_bytes()).hexdigest()
+            new_checksum = hashlib.md5(tmp_path.read_bytes()).hexdigest()
+            if old_checksum == new_checksum:
+                return
+        shutil.move(str(tmp_path), str(final_path))
 
     def generate_base_name(self, document: Document) -> Path:
         """
@@ -586,28 +712,3 @@ class Command(CryptMixin, BaseCommand):
         if perform_copy:
             target.parent.mkdir(parents=True, exist_ok=True)
             copy_file_with_basic_stats(source, target)
-
-    def encrypt_secret_fields(self, manifest: dict) -> None:
-        """
-        Encrypts certain fields in the export.  Currently limited to the mail account password
-        """
-
-        if self.passphrase:
-            self.setup_crypto(passphrase=self.passphrase)
-
-            for crypt_config in self.CRYPT_FIELDS:
-                exporter_key = crypt_config["exporter_key"]
-                crypt_fields = crypt_config["fields"]
-                for manifest_record in manifest[exporter_key]:
-                    for field in crypt_fields:
-                        if manifest_record["fields"][field]:
-                            manifest_record["fields"][field] = self.encrypt_string(
-                                value=manifest_record["fields"][field],
-                            )
-
-        elif MailAccount.objects.count() > 0 or SocialToken.objects.count() > 0:
-            self.stdout.write(
-                self.style.NOTICE(
-                    "No passphrase was given, sensitive fields will be in plaintext",
-                ),
-            )
