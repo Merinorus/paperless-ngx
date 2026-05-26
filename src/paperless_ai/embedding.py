@@ -1,4 +1,5 @@
 import json
+import re
 from typing import TYPE_CHECKING
 
 from django.conf import settings
@@ -13,6 +14,9 @@ from documents.models import Note
 from paperless.config import AIConfig
 from paperless.models import LLMEmbeddingBackend
 from paperless.network import validate_outbound_http_url
+
+OCR_LEADER_REGEX = re.compile(r"[._\-\u00b7]{4,}")
+HORIZONTAL_WHITESPACE_REGEX = re.compile(r"[ \t\u00a0]+")
 
 
 def get_embedding_model() -> "BaseEmbedding":
@@ -100,6 +104,11 @@ def get_embedding_dim() -> int:
     return dim
 
 
+def _normalize_llm_index_text(text: str) -> str:
+    text = OCR_LEADER_REGEX.sub(" ", text)
+    return HORIZONTAL_WHITESPACE_REGEX.sub(" ", text)
+
+
 def build_llm_index_text(doc: Document) -> str:
     lines = [
         f"Title: {doc.title}",
@@ -121,4 +130,4 @@ def build_llm_index_text(doc: Document) -> str:
     lines.append("\nContent:\n")
     lines.append(doc.content or "")
 
-    return "\n".join(lines)
+    return _normalize_llm_index_text("\n".join(lines))
