@@ -2,6 +2,7 @@ from documents.search._backend import SearchHit
 from documents.search._backend import SearchIndexLockError
 from documents.search._backend import SearchMode
 from documents.search._backend import TantivyBackend
+from documents.search._backend import TantivyLazyResultPage
 from documents.search._backend import TantivyRelevanceList
 from documents.search._backend import WriteBatch
 from documents.search._backend import get_backend
@@ -14,6 +15,7 @@ __all__ = [
     "SearchIndexLockError",
     "SearchMode",
     "TantivyBackend",
+    "TantivyLazyResultPage",
     "TantivyRelevanceList",
     "WriteBatch",
     "get_backend",
