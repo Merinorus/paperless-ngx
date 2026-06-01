@@ -149,6 +149,54 @@ class TantivyRelevanceList:
         return self._ordered_ids
 
 
+class TantivyLazyResultPage:
+    """
+    DRF-compatible wrapper for a single lazily-fetched search page.
+
+    Holds only the total match count and the current page of ``SearchHit``
+    dicts — never the full result set. Django/DRF pagination calls ``__len__``
+    (the total, for page-count math) and ``__getitem__`` with the active page's
+    slice, which we satisfy from the pre-fetched hits.
+
+    Args:
+        total: Total number of matching documents (from Tantivy's count).
+        page_hits: Rich SearchHit dicts for the requested page only.
+        page_offset: Index into the full result set where *page_hits* starts.
+    """
+
+    def __init__(
+        self,
+        total: int,
+        page_hits: list[SearchHit],
+        page_offset: int = 0,
+    ) -> None:
+        self._total = total
+        self._page_hits = page_hits
+        self._page_offset = page_offset
+
+    def __len__(self) -> int:
+        return self._total
+
+    def __getitem__(self, key: int | slice) -> SearchHit | list[SearchHit]:
+        if isinstance(key, slice):
+            start = key.start or 0
+            stop = key.stop if key.stop is not None else self._total
+            # Normal pagination slices exactly the active page.
+            if start == self._page_offset:
+                return self._page_hits[: stop - start]
+            # Out-of-band slice (not produced by standard pagination): map into
+            # the page window where possible, else return nothing.
+            lo = start - self._page_offset
+            if 0 <= lo < len(self._page_hits):
+                return self._page_hits[lo : stop - self._page_offset]
+            return []
+        idx = key if key >= 0 else self._total + key
+        rel = idx - self._page_offset
+        if 0 <= rel < len(self._page_hits):
+            return self._page_hits[rel]
+        raise IndexError(key)
+
+
 class SearchIndexLockError(Exception):
     """Raised when the search index file lock cannot be acquired within the timeout."""
 
@@ -297,6 +345,18 @@ class TantivyBackend:
             "num_notes",
         },
     )
+
+    # selection_data facets: API key → index fast field (counted via aggregation).
+    SELECTION_AGG_FIELDS: dict[str, str] = {
+        "selected_correspondents": "correspondent_id",
+        "selected_tags": "tag_id",
+        "selected_document_types": "document_type_id",
+        "selected_storage_paths": "storage_path_id",
+        "selected_custom_fields": "custom_field_id",
+    }
+    # Upper bound on distinct values returned per facet. Well above any realistic
+    # tag/correspondent/custom-field cardinality, so buckets are never truncated.
+    SELECTION_AGG_SIZE: int = 65_000
 
     def __init__(self, path: Path | None = None):
         # path=None → in-memory index (for tests)
@@ -468,6 +528,8 @@ class TantivyBackend:
                     "value": search_value,
                 },
             )
+            # ID-only fast field for selection_data aggregation (counts per field).
+            doc.add_unsigned("custom_field_id", cfi.field_id)
 
         # Dates
         created_date = datetime(
@@ -491,6 +553,12 @@ class TantivyBackend:
         # Owner
         if document.owner_id:
             doc.add_unsigned("owner_id", document.owner_id)
+
+        # Root/version marker: root (canonical) documents have no parent, so the
+        # field is simply omitted for them. Versions carry their root's pk. The
+        # search filters to root-only via `exists_query("root_document_id")` negated.
+        if document.root_document_id is not None:
+            doc.add_unsigned("root_document_id", document.root_document_id)
 
         # Viewers with permission
         if viewer_ids is None:
@@ -776,6 +844,260 @@ class TantivyBackend:
             "list[int]",
             searcher.fast_field_values("id", [doc_addr for doc_addr, *_ in all_hits]),
         )
+
+    def _root_only_filter(self) -> tantivy.Query:
+        """
+        Match only root (canonical) documents — those without a parent.
+
+        Versions carry ``root_document_id``; root documents omit it, so we
+        negate the field's existence (same pattern as the public-document
+        branch in :func:`build_permission_filter`).
+        """
+        return tantivy.Query.boolean_query(
+            [
+                (tantivy.Occur.Must, tantivy.Query.all_query()),
+                (tantivy.Occur.MustNot, tantivy.Query.exists_query("root_document_id")),
+            ],
+        )
+
+    def _compose_query(
+        self,
+        user_query: tantivy.Query,
+        user: AbstractUser | None,
+        *,
+        root_only: bool,
+        filter_ids: list[int] | None,
+    ) -> tantivy.Query:
+        """
+        Combine the user query with permission, root-only and DRF-filter clauses.
+
+        ``filter_ids`` (when provided) restricts results to a set of document
+        IDs via a single ``term_set_query`` — used to fold active DRF filters
+        (tags, dates, custom fields…) into Tantivy instead of intersecting in
+        the ORM. Pass ``None`` when no extra filters are active.
+        """
+        clauses: list[tuple[tantivy.Occur, tantivy.Query]] = [
+            (tantivy.Occur.Must, user_query),
+        ]
+        if user is not None:
+            clauses.append(
+                (tantivy.Occur.Must, build_permission_filter(self._schema, user)),
+            )
+        if root_only:
+            clauses.append((tantivy.Occur.Must, self._root_only_filter()))
+        if filter_ids is not None:
+            clauses.append(
+                (
+                    tantivy.Occur.Must,
+                    tantivy.Query.term_set_query(self._schema, "id", filter_ids),
+                ),
+            )
+        if len(clauses) == 1:
+            return user_query
+        return tantivy.Query.boolean_query(clauses)
+
+    def _hits_with_highlights(
+        self,
+        searcher: tantivy.Searcher,
+        hits: list[tuple[float, tantivy.DocAddress]],
+        query: str,
+        search_mode: SearchMode,
+        *,
+        rank_start: int,
+        score_divisor: float = 1.0,
+    ) -> list[SearchHit]:
+        """
+        Build SearchHit dicts (with content/notes snippets) for ordered hits.
+
+        Snippet generators are created lazily and reused across the page. Scores
+        are divided by ``score_divisor`` (the global top score) so the best match
+        normalizes to ~1.0, matching the previous API behaviour.
+        """
+        highlight_query = self._parse_query(query, search_mode)
+        if search_mode is SearchMode.TEXT:
+            highlight_query = parse_simple_text_highlight_query(self._index, query)
+
+        # Strip field:value prefixes so bare terms still highlight notes_text
+        # (see highlight_hits for the rationale).
+        bare_query = re.sub(r"\w[\w.]*:", "", query).strip()
+        try:
+            notes_text_query = (
+                self._index.parse_query(bare_query, ["notes_text"])
+                if bare_query
+                else highlight_query
+            )
+        except Exception:
+            notes_text_query = highlight_query
+
+        content_gen = None
+        notes_gen = None
+        out: list[SearchHit] = []
+        for rank, (score, address) in enumerate(hits, start=rank_start):
+            doc = searcher.doc(address)
+            doc_dict = doc.to_dict()
+            doc_id = int(doc_dict["id"][0])
+            highlights: dict[str, str] = {}
+            try:
+                if content_gen is None:
+                    content_gen = tantivy.SnippetGenerator.create(
+                        searcher,
+                        highlight_query,
+                        self._schema,
+                        "content",
+                    )
+                content_html = content_gen.snippet_from_doc(doc).to_html()
+                if content_html:
+                    highlights["content"] = content_html
+
+                if search_mode is SearchMode.QUERY and "notes_text" in doc_dict:
+                    if notes_gen is None:
+                        notes_gen = tantivy.SnippetGenerator.create(
+                            searcher,
+                            notes_text_query,
+                            self._schema,
+                            "notes_text",
+                        )
+                    notes_html = notes_gen.snippet_from_doc(doc).to_html()
+                    if notes_html:
+                        highlights["notes"] = notes_html
+            except Exception:  # pragma: no cover
+                logger.debug("Failed to generate highlights for doc %s", doc_id)
+
+            out.append(
+                SearchHit(
+                    id=doc_id,
+                    score=(score / score_divisor) if score_divisor else score,
+                    rank=rank,
+                    highlights=highlights,
+                ),
+            )
+        return out
+
+    def search_page(
+        self,
+        query: str,
+        user: AbstractUser | None,
+        *,
+        sort_field: str | None = None,
+        sort_reverse: bool = False,
+        search_mode: SearchMode = SearchMode.QUERY,
+        page_offset: int = 0,
+        page_size: int = 25,
+        root_only: bool = True,
+        filter_ids: list[int] | None = None,
+    ) -> tuple[list[SearchHit], int]:
+        """
+        Lazily fetch a single page of results plus the total match count.
+
+        Runs one Tantivy search over ``[page_offset, page_offset + page_size)``
+        and generates highlights only for that page. Unlike :meth:`search_ids`,
+        this never materializes the full result set, so it avoids the ORM
+        intersection and the giant ``WHERE id IN (...)`` round-trip.
+
+        Returns:
+            ``(page_hits, total_match_count)``. ``total`` comes from Tantivy's
+            Count collector (no document materialization needed).
+        """
+        self._ensure_open()
+        user_query = self._parse_query(query, search_mode)
+        final_query = self._compose_query(
+            user_query,
+            user,
+            root_only=root_only,
+            filter_ids=filter_ids,
+        )
+
+        searcher = self._index.searcher()
+        use_sort = bool(sort_field) and sort_field in self.SORT_FIELD_MAP
+
+        if page_size <= 0 or page_offset < 0:
+            # No page to fetch (count-only request, or an out-of-range page such
+            # as page=0 — pagination will surface the 404). Tantivy rejects a
+            # negative offset, so guard before searching.
+            return [], searcher.search(final_query, limit=1).count
+
+        if use_sort:
+            results = searcher.search(
+                final_query,
+                limit=page_size,
+                offset=page_offset,
+                order_by_field=self.SORT_FIELD_MAP[sort_field],
+                order=tantivy.Order.Desc if sort_reverse else tantivy.Order.Asc,
+            )
+        else:
+            results = searcher.search(
+                final_query,
+                limit=page_size,
+                offset=page_offset,
+            )
+        total = results.count
+        if not results.hits:
+            return [], total
+
+        # Relevance mode: normalize against the global top score so the best
+        # match is ~1.0. On the first page the top hit IS the global best, so we
+        # avoid re-running the (possibly expensive) query; later pages need one
+        # extra top-1 search at offset 0.
+        score_divisor = 1.0
+        if not use_sort:
+            if page_offset == 0:
+                score_divisor = results.hits[0][0] or 1.0
+            else:
+                top = searcher.search(final_query, limit=1)
+                if top.hits:
+                    score_divisor = top.hits[0][0] or 1.0
+
+        hits = self._hits_with_highlights(
+            searcher,
+            results.hits,
+            query,
+            search_mode,
+            rank_start=page_offset + 1,
+            score_divisor=score_divisor,
+        )
+        return hits, total
+
+    def selection_data(
+        self,
+        query: str,
+        user: AbstractUser | None,
+        *,
+        search_mode: SearchMode = SearchMode.QUERY,
+        root_only: bool = True,
+        filter_ids: list[int] | None = None,
+    ) -> dict[str, list[dict[str, int]]]:
+        """
+        Per-facet document counts for the full result set, via Tantivy aggregations.
+
+        Returns the same shape as the ORM-based selection_data: for each facet a
+        list of ``{"id": <entity pk>, "document_count": n}``. Counts come from
+        fast-field terms aggregations over the matching documents — no SQL, no
+        full ID list. Only facet values present in at least one matching document
+        are returned (zero-count entities are omitted).
+        """
+        self._ensure_open()
+        user_query = self._parse_query(query, search_mode)
+        final_query = self._compose_query(
+            user_query,
+            user,
+            root_only=root_only,
+            filter_ids=filter_ids,
+        )
+        searcher = self._index.searcher()
+
+        agg = {
+            key: {"terms": {"field": field, "size": self.SELECTION_AGG_SIZE}}
+            for key, field in self.SELECTION_AGG_FIELDS.items()
+        }
+        raw = searcher.aggregate(final_query, agg)
+
+        return {
+            key: [
+                {"id": int(bucket["key"]), "document_count": int(bucket["doc_count"])}
+                for bucket in raw.get(key, {}).get("buckets", [])
+            ]
+            for key in self.SELECTION_AGG_FIELDS
+        }
 
     def autocomplete(
         self,

@@ -16,7 +16,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger("paperless.search")
 
 # v1 - Initial tantivy schema format
-SCHEMA_VERSION: Final[int] = 1
+# v2 - Add root_document_id to allow root-only filtering inside Tantivy
+#      (lets search paginate lazily without an ORM intersection step).
+SCHEMA_VERSION: Final[int] = 2
 
 
 def build_schema() -> tantivy.Schema:
@@ -102,6 +104,13 @@ def build_schema() -> tantivy.Schema:
         "tag_id",
         "owner_id",
         "viewer_id",
+        # Absent on root documents; present (→ parent pk) on versions. Lets the
+        # search filter to root-only without an ORM round-trip.
+        "root_document_id",
+        # ID-only companion to the JSON `custom_fields` field: lets selection_data
+        # count documents per custom field via a Tantivy aggregation (no SQL).
+        # Multi-valued, like tag_id. The value stays in the JSON field for search.
+        "custom_field_id",
     ):
         sb.add_unsigned_field(field, stored=False, indexed=True, fast=True)
 

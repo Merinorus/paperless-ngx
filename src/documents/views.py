@@ -267,6 +267,26 @@ logger = logging.getLogger("paperless.api")
 _TANTIVY_INTERSECT_THRESHOLD = 5_000
 _TANTIVY_SEARCH_PARAM_NAMES = ("text", "title_search", "query", "more_like_id")
 
+# Query params that are NOT DRF document filters: the search terms themselves,
+# pagination, ordering and response-shaping. Any *other* param is treated as an
+# active filter, in which case the search folds the filtered IDs into Tantivy
+# (term_set) instead of paginating Tantivy alone. Unknown params are treated as
+# filters on purpose — a false positive only costs an ID fetch, a false negative
+# would leak unfiltered results.
+_NON_FILTER_PARAMS = frozenset(
+    {
+        *_TANTIVY_SEARCH_PARAM_NAMES,
+        "page",
+        "page_size",
+        "ordering",
+        "format",
+        "fields",
+        "truncate_content",
+        "full_perms",
+        "include_selection_data",
+    },
+)
+
 
 def _get_tantivy_query_and_mode(params):
     from documents.search import SearchMode
@@ -2291,6 +2311,7 @@ class UnifiedSearchViewSet(DocumentViewSet):
         from documents.search import SearchHit
         from documents.search import SearchQueryError
         from documents.search import TantivyBackend
+        from documents.search import TantivyLazyResultPage
         from documents.search import TantivyRelevanceList
         from documents.search import get_backend
 
@@ -2431,16 +2452,111 @@ class UnifiedSearchViewSet(DocumentViewSet):
                 page_offset=page_offset,
             )
 
+        def active_filter_ids(user: User | None) -> list[int] | None:
+            """
+            IDs matching active DRF filters, or None when no extra filter is set.
+
+            When the request carries only search/pagination/ordering params we let
+            Tantivy paginate on its own (returns None). When real filters (tags,
+            dates, custom fields…) are present we materialize their IDs once and
+            fold them into the Tantivy query via term_set — no per-page ORM
+            intersection, no giant ``WHERE id IN (...)``.
+            """
+            if not any(p not in _NON_FILTER_PARAMS for p in request.query_params):
+                return None
+            filtered_qs = self.filter_queryset(self.get_queryset())
+            # order_by() drops the display ordering so the ID fetch stays lean.
+            return list(filtered_qs.order_by().values_list("pk", flat=True))
+
+        def run_lazy_text_search(
+            backend: TantivyBackend,
+            user: User | None,
+            filter_ids: list[int] | None,
+        ):
+            """Lazy text/title/query search: one page + total, no full ID list."""
+            query_str, search_mode = _get_tantivy_query_and_mode(request.query_params)
+            is_score_sort = sort_field_name == "score"
+            page_offset = (page_num - 1) * page_size
+            hits, total = backend.search_page(
+                query_str,
+                user,
+                sort_field=(
+                    None if (not use_tantivy_sort or is_score_sort) else sort_field_name
+                ),
+                sort_reverse=sort_reverse,
+                search_mode=search_mode,
+                page_offset=page_offset,
+                page_size=page_size,
+                filter_ids=filter_ids,
+            )
+            return query_str, search_mode, hits, total, page_offset
+
         try:
             sort_field_name, sort_reverse, use_tantivy_sort, page_num, page_size = (
                 parse_search_params()
             )
 
             backend = get_backend()
-            filtered_qs = self.filter_queryset(self.get_queryset())
             user = None if request.user.is_superuser else request.user
 
-            if "more_like_id" in request.query_params:
+            # The lazy path only applies when Tantivy can produce the exact
+            # ordered page on its own. It falls back to the legacy fetch-all +
+            # ORM-intersection path when:
+            #   - more_like_id (no offset pagination of the similarity query),
+            #   - ascending-score ordering (a global reversal of the ranked list),
+            #   - text/custom-field ordering (use_tantivy_sort is False — the DB
+            #     collation differs from Tantivy's tokenized sort fields),
+            #   - API < v10, which still expects the legacy `all` id list.
+            is_more_like = "more_like_id" in request.query_params
+            is_score_asc = sort_field_name == "score" and not sort_reverse
+            default_version = settings.REST_FRAMEWORK["DEFAULT_VERSION"]
+            try:
+                api_version = int(request.version or default_version)
+            except (TypeError, ValueError):
+                api_version = int(default_version)
+
+            use_lazy = (
+                not is_more_like
+                and not is_score_asc
+                and use_tantivy_sort
+                and api_version >= 10
+            )
+
+            if use_lazy:
+                filter_ids = active_filter_ids(user)
+                query_str, search_mode, hits, total, page_offset = run_lazy_text_search(
+                    backend,
+                    user,
+                    filter_ids,
+                )
+                rl = TantivyLazyResultPage(total, hits, page_offset)
+                page = self.paginate_queryset(rl)
+
+                if page is not None:
+                    serializer = self.get_serializer(page, many=True)
+                    response = self.get_paginated_response(serializer.data)
+                    response.data["corrected_query"] = None
+                    if get_boolean(
+                        str(
+                            request.query_params.get("include_selection_data", "false"),
+                        ),
+                    ):
+                        # Facet counts come from Tantivy fast-field aggregations —
+                        # no SQL, no full ID list.
+                        response.data["selection_data"] = backend.selection_data(
+                            query_str,
+                            user,
+                            search_mode=search_mode,
+                            filter_ids=filter_ids,
+                        )
+                    return response
+
+                serializer = self.get_serializer(hits, many=True)
+                return Response(serializer.data)
+
+            # Legacy fetch-all path (more_like_id / ascending-score ordering).
+            filtered_qs = self.filter_queryset(self.get_queryset())
+            if is_more_like:
                 result = run_more_like_this(backend, user, filtered_qs)
             else:
                 result = run_text_search(backend, user, filtered_qs)
@@ -2459,10 +2575,6 @@ class UnifiedSearchViewSet(DocumentViewSet):
                 if get_boolean(
                     str(request.query_params.get("include_selection_data", "false")),
                 ):
-                    # NOTE: pk__in=ordered_ids generates a large SQL IN clause
-                    # for big result sets.  Acceptable today but may need a temp
-                    # table or chunked approach if selection_data becomes slow
-                    # at scale (tens of thousands of matching documents).
                     response.data["selection_data"] = (
                         self._get_selection_data_for_queryset(
                             filtered_qs.filter(pk__in=result.ordered_ids),
