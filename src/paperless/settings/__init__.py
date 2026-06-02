@@ -454,6 +454,12 @@ PAPERLESS_URL = _parse_paperless_url()
 
 # For use with trusted proxies
 TRUSTED_PROXIES = get_list_from_env("PAPERLESS_TRUSTED_PROXIES")
+# Derive allauth's proxy count from the same list so X-Forwarded-For is trusted
+# correctly when users have configured PAPERLESS_TRUSTED_PROXIES.
+ALLAUTH_TRUSTED_PROXY_COUNT = len(TRUSTED_PROXIES)
+ALLAUTH_TRUSTED_CLIENT_IP_HEADER = os.getenv(
+    "PAPERLESS_ALLAUTH_TRUSTED_CLIENT_IP_HEADER",
+)
 
 USE_X_FORWARDED_HOST = get_bool_from_env("PAPERLESS_USE_X_FORWARD_HOST", "false")
 USE_X_FORWARDED_PORT = get_bool_from_env("PAPERLESS_USE_X_FORWARD_PORT", "false")
@@ -650,6 +656,11 @@ logging.config.dictConfig(LOGGING)
 # https://docs.celeryq.dev/en/stable/userguide/configuration.html
 
 CELERY_BROKER_URL = _CELERY_REDIS_URL
+CELERY_RESULT_BACKEND = _CELERY_REDIS_URL
+CELERY_RESULT_SERIALIZER = "signed-pickle"
+# Results are only needed for chord synchronization
+# a short TTL avoids Redis memory accumulation.
+CELERY_RESULT_EXPIRES = 3600
 CELERY_TIMEZONE = TIME_ZONE
 
 CELERY_WORKER_HIJACK_ROOT_LOGGER = False
@@ -1173,8 +1184,18 @@ REMOTE_OCR_ENDPOINT = os.getenv("PAPERLESS_REMOTE_OCR_ENDPOINT")
 AI_ENABLED = get_bool_from_env("PAPERLESS_AI_ENABLED", "NO")
 LLM_EMBEDDING_BACKEND = os.getenv(
     "PAPERLESS_AI_LLM_EMBEDDING_BACKEND",
-)  # "huggingface" or "openai-like"
+)  # "huggingface", "openai-like", or "ollama"
 LLM_EMBEDDING_MODEL = os.getenv("PAPERLESS_AI_LLM_EMBEDDING_MODEL")
+LLM_EMBEDDING_ENDPOINT = os.getenv("PAPERLESS_AI_LLM_EMBEDDING_ENDPOINT")
+LLM_EMBEDDING_CHUNK_SIZE = get_int_from_env(
+    "PAPERLESS_AI_LLM_EMBEDDING_CHUNK_SIZE",
+    1024,
+)
+if LLM_EMBEDDING_CHUNK_SIZE < 1:
+    raise ImproperlyConfigured("PAPERLESS_AI_LLM_EMBEDDING_CHUNK_SIZE must be >= 1")
+LLM_CONTEXT_SIZE = get_int_from_env("PAPERLESS_AI_LLM_CONTEXT_SIZE", 8192)
+if LLM_CONTEXT_SIZE < 1:
+    raise ImproperlyConfigured("PAPERLESS_AI_LLM_CONTEXT_SIZE must be >= 1")
 LLM_BACKEND = os.getenv("PAPERLESS_AI_LLM_BACKEND")  # "ollama" or "openai-like"
 LLM_MODEL = os.getenv("PAPERLESS_AI_LLM_MODEL")
 LLM_API_KEY = os.getenv("PAPERLESS_AI_LLM_API_KEY")

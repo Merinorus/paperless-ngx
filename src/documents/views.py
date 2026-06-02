@@ -67,7 +67,6 @@ from django.views import View
 from django.views.decorators.cache import cache_control
 from django.views.decorators.csrf import ensure_csrf_cookie
 from django.views.decorators.http import condition
-from django.views.decorators.http import last_modified
 from django.views.generic import TemplateView
 from django_filters.rest_framework import DjangoFilterBackend
 from drf_spectacular.openapi import AutoSchema
@@ -124,6 +123,7 @@ from documents.conditionals import preview_etag
 from documents.conditionals import preview_last_modified
 from documents.conditionals import suggestions_etag
 from documents.conditionals import suggestions_last_modified
+from documents.conditionals import thumbnail_etag
 from documents.conditionals import thumbnail_last_modified
 from documents.data_models import ConsumableDocument
 from documents.data_models import DocumentMetadataOverrides
@@ -1469,9 +1469,21 @@ class DocumentViewSet(
         if not ai_config.ai_enabled:
             return HttpResponseBadRequest("AI is required for this feature")
 
+        output_language = None
+        if hasattr(request.user, "ui_settings") and isinstance(
+            request.user.ui_settings.settings,
+            dict,
+        ):
+            output_language = request.user.ui_settings.settings.get("language") or None
+        llm_cache_backend = (
+            f"{ai_config.llm_backend}:{output_language}"
+            if output_language
+            else ai_config.llm_backend
+        )
+
         cached_llm_suggestions = get_llm_suggestion_cache(
             doc.pk,
-            backend=ai_config.llm_backend,
+            backend=llm_cache_backend,
         )
 
         if cached_llm_suggestions:
@@ -1479,7 +1491,11 @@ class DocumentViewSet(
             return Response(cached_llm_suggestions.suggestions)
 
         try:
-            llm_suggestions = get_ai_document_classification(doc, request.user)
+            llm_suggestions = get_ai_document_classification(
+                doc,
+                request.user,
+                output_language,
+            )
         except ValueError as exc:
             logger.exception(
                 "Invalid AI configuration while generating suggestions for "
@@ -1532,7 +1548,7 @@ class DocumentViewSet(
             "dates": llm_suggestions.get("dates", []),
         }
 
-        set_llm_suggestions_cache(doc.pk, resp_data, backend=ai_config.llm_backend)
+        set_llm_suggestions_cache(doc.pk, resp_data, backend=llm_cache_backend)
 
         return Response(resp_data)
 
@@ -1542,7 +1558,7 @@ class DocumentViewSet(
         condition(etag_func=preview_etag, last_modified_func=preview_last_modified),
     )
     def preview(self, request, pk=None):
-        resolved = self._resolve_request_and_root_doc(pk, request)
+        resolved = self._resolve_request_and_root_doc(pk, request, include_deleted=True)
         if isinstance(resolved, HttpResponseForbidden):
             return resolved
 
@@ -1564,9 +1580,14 @@ class DocumentViewSet(
 
     @action(methods=["get"], detail=True, filter_backends=[])
     @method_decorator(cache_control(no_cache=True))
-    @method_decorator(last_modified(thumbnail_last_modified))
+    @method_decorator(
+        condition(
+            etag_func=thumbnail_etag,
+            last_modified_func=thumbnail_last_modified,
+        ),
+    )
     def thumb(self, request, pk=None):
-        resolved = self._resolve_request_and_root_doc(pk, request)
+        resolved = self._resolve_request_and_root_doc(pk, request, include_deleted=True)
         if isinstance(resolved, HttpResponseForbidden):
             return resolved
 
@@ -1653,7 +1674,7 @@ class DocumentViewSet(
                     )
 
                 doc.modified = timezone.now()
-                doc.save()
+                doc.save(update_fields=["modified"])
 
                 from documents.search import get_backend
 
@@ -1697,7 +1718,7 @@ class DocumentViewSet(
             note.delete()
 
             doc.modified = timezone.now()
-            doc.save()
+            doc.save(update_fields=["modified"])
 
             from documents.search import get_backend
 
@@ -2133,7 +2154,7 @@ class DocumentViewSet(
 
 
 class ChatStreamingSerializer(serializers.Serializer[dict[str, Any]]):
-    q = serializers.CharField(required=True)
+    q = serializers.CharField(required=True, max_length=4000)
     document_id = serializers.IntegerField(required=False, allow_null=True)
 
 
@@ -2145,7 +2166,7 @@ class ChatStreamingSerializer(serializers.Serializer[dict[str, Any]]):
     name="dispatch",
 )
 class ChatStreamingView(GenericAPIView[Any]):
-    permission_classes = (IsAuthenticated,)
+    permission_classes = (IsAuthenticated, ViewDocumentsPermissions)
     serializer_class = ChatStreamingSerializer
 
     def post(self, request, *args, **kwargs):
@@ -2154,12 +2175,11 @@ class ChatStreamingView(GenericAPIView[Any]):
         if not ai_config.ai_enabled:
             return HttpResponseBadRequest("AI is required for this feature")
 
-        try:
-            question = request.data["q"]
-        except KeyError:
-            return HttpResponseBadRequest("Invalid request")
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        question = serializer.validated_data["q"]
 
-        doc_id = request.data.get("document_id")
+        doc_id = serializer.validated_data.get("document_id")
 
         if doc_id:
             try:
@@ -3614,7 +3634,7 @@ class StatisticsView(GenericAPIView[Any]):
                 "documents.view_document",
                 Document,
             )
-        )
+        ).filter(root_document__isnull=True)
         tags = (
             Tag.objects.all()
             if can_view_global_stats

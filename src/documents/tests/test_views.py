@@ -25,6 +25,7 @@ from documents.models import DocumentType
 from documents.models import ShareLink
 from documents.models import StoragePath
 from documents.models import Tag
+from documents.models import UiSettings
 from documents.signals.handlers import update_llm_suggestions_cache
 from documents.tests.utils import DirectoriesMixin
 from documents.tests.utils import read_streaming_response
@@ -319,6 +320,10 @@ class TestAISuggestions(DirectoriesMixin, TestCase):
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertEqual(response.json(), {"tags": ["tag1", "tag2"]})
+        mock_get_cache.assert_called_once_with(
+            self.document.pk,
+            backend="mock_backend",
+        )
         mock_refresh_cache.assert_called_once_with(self.document.pk)
 
     @patch("documents.views.get_ai_document_classification")
@@ -358,6 +363,49 @@ class TestAISuggestions(DirectoriesMixin, TestCase):
                 "suggested_storage_paths": [],
                 "dates": ["2023-01-01"],
             },
+        )
+        mock_get_ai_classification.assert_called_once_with(
+            self.document,
+            self.user,
+            None,
+        )
+
+    @patch("documents.views.get_ai_document_classification")
+    @override_settings(
+        AI_ENABLED=True,
+        LLM_BACKEND="mock_backend",
+    )
+    def test_ai_suggestions_uses_user_display_language(
+        self,
+        mock_get_ai_classification,
+    ) -> None:
+        UiSettings.objects.create(user=self.user, settings={"language": "de-de"})
+        mock_get_ai_classification.return_value = {
+            "title": "KI Title",
+            "tags": [],
+            "correspondents": [],
+            "document_types": [],
+            "storage_paths": [],
+            "dates": [],
+        }
+
+        self.client.force_login(user=self.user)
+        response = self.client.get(
+            f"/api/documents/{self.document.pk}/ai_suggestions/",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_get_ai_classification.assert_called_once_with(
+            self.document,
+            self.user,
+            "de-de",
+        )
+        self.assertEqual(
+            get_llm_suggestion_cache(
+                self.document.pk,
+                backend="mock_backend:de-de",
+            ).suggestions["title"],
+            "KI Title",
         )
 
     @patch("documents.views.get_ai_document_classification")
@@ -437,8 +485,14 @@ class TestAIChatStreamingView(DirectoriesMixin, TestCase):
         )
         super().setUp()
 
+    def grant_view_document_permission(self) -> None:
+        self.user.user_permissions.add(
+            *Permission.objects.filter(codename="view_document"),
+        )
+
     @override_settings(AI_ENABLED=False)
     def test_post_ai_disabled(self) -> None:
+        self.grant_view_document_permission()
         response = self.client.post(
             self.ENDPOINT,
             data='{"q": "question"}',
@@ -451,6 +505,7 @@ class TestAIChatStreamingView(DirectoriesMixin, TestCase):
     @patch("documents.views.get_objects_for_user_owner_aware")
     @override_settings(AI_ENABLED=True)
     def test_post_no_document_id(self, mock_get_objects, mock_stream_chat) -> None:
+        self.grant_view_document_permission()
         mock_get_objects.return_value = [self.document]
         mock_stream_chat.return_value = iter([b"data"])
         response = self.client.post(
@@ -464,6 +519,7 @@ class TestAIChatStreamingView(DirectoriesMixin, TestCase):
     @patch("documents.views.stream_chat_with_documents")
     @override_settings(AI_ENABLED=True)
     def test_post_with_document_id(self, mock_stream_chat) -> None:
+        self.grant_view_document_permission()
         mock_stream_chat.return_value = iter([b"data"])
         response = self.client.post(
             self.ENDPOINT,
@@ -475,6 +531,7 @@ class TestAIChatStreamingView(DirectoriesMixin, TestCase):
 
     @override_settings(AI_ENABLED=True)
     def test_post_with_invalid_document_id(self) -> None:
+        self.grant_view_document_permission()
         response = self.client.post(
             self.ENDPOINT,
             data='{"q": "question", "document_id": 999999}',
@@ -486,6 +543,7 @@ class TestAIChatStreamingView(DirectoriesMixin, TestCase):
     @patch("documents.views.has_perms_owner_aware")
     @override_settings(AI_ENABLED=True)
     def test_post_with_document_id_no_permission(self, mock_has_perms) -> None:
+        self.grant_view_document_permission()
         mock_has_perms.return_value = False
         response = self.client.post(
             self.ENDPOINT,
@@ -494,3 +552,31 @@ class TestAIChatStreamingView(DirectoriesMixin, TestCase):
         )
         self.assertEqual(response.status_code, 403)
         self.assertIn(b"Insufficient permissions", response.content)
+
+    @patch("documents.views.stream_chat_with_documents")
+    @override_settings(AI_ENABLED=True)
+    def test_post_no_document_id_requires_view_document_permission(
+        self,
+        mock_stream_chat,
+    ) -> None:
+        response = self.client.post(
+            self.ENDPOINT,
+            data='{"q": "question"}',
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+        mock_stream_chat.assert_not_called()
+
+    @patch("documents.views.stream_chat_with_documents")
+    @override_settings(AI_ENABLED=True)
+    def test_post_with_document_id_requires_view_document_permission(
+        self,
+        mock_stream_chat,
+    ) -> None:
+        response = self.client.post(
+            self.ENDPOINT,
+            data=f'{{"q": "question", "document_id": {self.document.pk}}}',
+            content_type="application/json",
+        )
+        self.assertEqual(response.status_code, 403)
+        mock_stream_chat.assert_not_called()

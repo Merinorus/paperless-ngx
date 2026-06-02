@@ -945,6 +945,10 @@ class TestPDFActions(DirectoriesMixin, TestCase):
         pages = [[1, 2], [3]]
         self.doc2.archive_serial_number = 200
         self.doc2.save()
+        errback = bulk_edit.restore_archive_serial_numbers_task.s(
+            {self.doc2.id: 200},
+        )
+        mock_chord.return_value.on_error.return_value = mock_chord.return_value
 
         result = bulk_edit.split(doc_ids, pages, delete_originals=True)
         self.assertEqual(result, "OK")
@@ -957,6 +961,8 @@ class TestPDFActions(DirectoriesMixin, TestCase):
 
         mock_delete_documents.assert_called()
         mock_chord.assert_called_once()
+        mock_chord.return_value.on_error.assert_called_once_with(errback)
+        mock_chord.return_value.apply_async.assert_called_once_with()
 
         delete_documents_args, _ = mock_delete_documents.call_args
         self.assertEqual(
@@ -991,6 +997,7 @@ class TestPDFActions(DirectoriesMixin, TestCase):
         self.doc2.save()
 
         sig = mock.Mock()
+        sig.on_error.return_value = sig
         sig.apply_async.side_effect = Exception("boom")
         mock_chord.return_value = sig
 
@@ -1256,10 +1263,16 @@ class TestPDFActions(DirectoriesMixin, TestCase):
         operations = [{"page": 1}, {"page": 2}]
         self.doc2.archive_serial_number = 250
         self.doc2.save()
+        errback = bulk_edit.restore_archive_serial_numbers_task.s(
+            {self.doc2.id: 250},
+        )
+        mock_chord.return_value.on_error.return_value = mock_chord.return_value
 
         result = bulk_edit.edit_pdf(doc_ids, operations, delete_original=True)
         self.assertEqual(result, "OK")
         mock_chord.assert_called_once()
+        mock_chord.return_value.on_error.assert_called_once_with(errback)
+        mock_chord.return_value.apply_async.assert_called_once_with()
         self.assertEqual(mock_consume_file.call_args.kwargs["overrides"].asn, 250)
         self.doc2.refresh_from_db()
         self.assertIsNone(self.doc2.archive_serial_number)
@@ -1288,6 +1301,7 @@ class TestPDFActions(DirectoriesMixin, TestCase):
         self.doc2.save()
 
         sig = mock.Mock()
+        sig.on_error.return_value = sig
         sig.apply_async.side_effect = Exception("boom")
         mock_chord.return_value = sig
 
@@ -1479,6 +1493,44 @@ class TestPDFActions(DirectoriesMixin, TestCase):
         )
         self.assertEqual(task_kwargs["input_doc"].root_document_id, doc.id)
         self.assertIsNotNone(task_kwargs["overrides"])
+
+    @mock.patch("documents.bulk_edit.update_document_content_maybe_archive_file.delay")
+    @mock.patch("documents.tasks.consume_file.apply_async")
+    @mock.patch("documents.bulk_edit.tempfile.mkdtemp")
+    @mock.patch("pikepdf.open")
+    def test_remove_password_update_document_uses_source_paths(
+        self,
+        mock_open,
+        mock_mkdtemp,
+        mock_consume_delay,
+        mock_update_document,
+    ) -> None:
+        doc = self.doc1
+        source_file = self.dirs.scratch_dir / "consumption-source.pdf"
+        source_file.write_bytes(b"protected pdf content")
+        temp_dir = self.dirs.scratch_dir / "remove-password-source-file"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        mock_mkdtemp.return_value = str(temp_dir)
+
+        fake_pdf = mock.MagicMock()
+
+        def save_side_effect(target_path):
+            Path(target_path).write_bytes(b"new pdf content")
+
+        fake_pdf.save.side_effect = save_side_effect
+        mock_open.return_value.__enter__.return_value = fake_pdf
+
+        result = bulk_edit.remove_password(
+            [doc.id],
+            password="secret",
+            update_document=True,
+            source_paths_by_id={doc.id: source_file},
+        )
+
+        self.assertEqual(result, "OK")
+        mock_open.assert_called_once_with(source_file, password="secret")
+        mock_update_document.assert_not_called()
+        mock_consume_delay.assert_called_once()
 
     @mock.patch("documents.data_models.magic.from_file", return_value="application/pdf")
     @mock.patch("documents.tasks.consume_file.apply_async")

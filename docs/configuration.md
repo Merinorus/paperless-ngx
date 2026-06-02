@@ -518,7 +518,24 @@ do CORS calls. Set this to your public domain name.
 fail2ban with log entries for failed authorization attempts. Value should be
 IP address(es).
 
+    This setting also controls allauth's
+    [`ALLAUTH_TRUSTED_PROXY_COUNT`](https://docs.allauth.org/en/latest/account/configuration.html),
+    which is set to the number of proxies listed here. Without this,
+    allauth cannot determine the client IP address for rate limiting when
+    running behind a reverse proxy, resulting in a `403 Forbidden` on login.
+
     Defaults to empty string.
+
+#### [`PAPERLESS_ALLAUTH_TRUSTED_CLIENT_IP_HEADER=<header-name>`](#PAPERLESS_ALLAUTH_TRUSTED_CLIENT_IP_HEADER) {#PAPERLESS_ALLAUTH_TRUSTED_CLIENT_IP_HEADER}
+
+: Sets allauth's
+[`ALLAUTH_TRUSTED_CLIENT_IP_HEADER`](https://docs.allauth.org/en/latest/account/configuration.html).
+Use this when your reverse proxy sets a dedicated header for the real
+client IP instead of `X-Forwarded-For`, for example `X-Real-IP` (nginx)
+or `CF-Connecting-IP` (Cloudflare). When set, this takes precedence over
+[`PAPERLESS_TRUSTED_PROXIES`](#PAPERLESS_TRUSTED_PROXIES).
+
+    Defaults to none.
 
 #### [`PAPERLESS_FORCE_SCRIPT_NAME=<path>`](#PAPERLESS_FORCE_SCRIPT_NAME) {#PAPERLESS_FORCE_SCRIPT_NAME}
 
@@ -2014,8 +2031,8 @@ suggestions. This setting is required to be set to true in order to use the AI f
 
 #### [`PAPERLESS_AI_LLM_EMBEDDING_BACKEND=<str>`](#PAPERLESS_AI_LLM_EMBEDDING_BACKEND) {#PAPERLESS_AI_LLM_EMBEDDING_BACKEND}
 
-: The embedding backend to use for RAG. This can be either "openai-like" or "huggingface". The
-"openai-like" backend uses an OpenAI-compatible embeddings API.
+: The embedding backend to use for RAG. This can be "openai-like", "huggingface", or
+"ollama". The "openai-like" backend uses an OpenAI-compatible embeddings API.
 
     Defaults to None.
 
@@ -2023,10 +2040,33 @@ suggestions. This setting is required to be set to true in order to use the AI f
 
 : The model to use for the embedding backend for RAG. This can be set to any of the embedding
 models supported by the current embedding backend. If not supplied, defaults to
-"text-embedding-3-small" for the OpenAI-compatible backend and
-"sentence-transformers/all-MiniLM-L6-v2" for Huggingface.
+"text-embedding-3-small" for the OpenAI-compatible backend,
+"sentence-transformers/all-MiniLM-L6-v2" for Huggingface, and "embeddinggemma" for Ollama.
 
     Defaults to None.
+
+#### [`PAPERLESS_AI_LLM_EMBEDDING_ENDPOINT=<str>`](#PAPERLESS_AI_LLM_EMBEDDING_ENDPOINT) {#PAPERLESS_AI_LLM_EMBEDDING_ENDPOINT}
+
+: The endpoint / url to use for the embedding backend. If not supplied, embeddings use
+`PAPERLESS_AI_LLM_ENDPOINT`.
+
+    Defaults to None.
+
+#### [`PAPERLESS_AI_LLM_EMBEDDING_CHUNK_SIZE=<int>`](#PAPERLESS_AI_LLM_EMBEDDING_CHUNK_SIZE) {#PAPERLESS_AI_LLM_EMBEDDING_CHUNK_SIZE}
+
+: The chunk size to use when splitting document text for RAG embeddings. Lower this value if your
+embedding backend or model rejects larger inputs, or silently truncates inputs in a way that harms
+retrieval quality.
+
+    Defaults to 1024.
+
+#### [`PAPERLESS_AI_LLM_CONTEXT_SIZE=<int>`](#PAPERLESS_AI_LLM_CONTEXT_SIZE) {#PAPERLESS_AI_LLM_CONTEXT_SIZE}
+
+: The context size to use for AI prompts and RAG retrieval. For Ollama backends, this is also sent
+as `num_ctx` so models with very large native context windows are not loaded at their maximum
+context by default.
+
+    Defaults to 8192.
 
 #### [`PAPERLESS_AI_LLM_BACKEND=<str>`](#PAPERLESS_AI_LLM_BACKEND) {#PAPERLESS_AI_LLM_BACKEND}
 

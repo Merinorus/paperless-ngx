@@ -57,6 +57,7 @@ export const ConfigCategory = {
 export const LLMEmbeddingBackendConfig = {
   OPENAI_LIKE: 'openai-like',
   HUGGINGFACE: 'huggingface',
+  OLLAMA: 'ollama',
 }
 
 export const LLMBackendConfig = {
@@ -302,6 +303,27 @@ export const PaperlessConfigOptions: ConfigOption[] = [
     category: ConfigCategory.AI,
   },
   {
+    key: 'llm_embedding_endpoint',
+    title: $localize`LLM Embedding Endpoint`,
+    type: ConfigOptionType.String,
+    config_key: 'PAPERLESS_AI_LLM_EMBEDDING_ENDPOINT',
+    category: ConfigCategory.AI,
+  },
+  {
+    key: 'llm_embedding_chunk_size',
+    title: $localize`LLM Embedding Chunk Size`,
+    type: ConfigOptionType.Number,
+    config_key: 'PAPERLESS_AI_LLM_EMBEDDING_CHUNK_SIZE',
+    category: ConfigCategory.AI,
+  },
+  {
+    key: 'llm_context_size',
+    title: $localize`LLM Context Size`,
+    type: ConfigOptionType.Number,
+    config_key: 'PAPERLESS_AI_LLM_CONTEXT_SIZE',
+    category: ConfigCategory.AI,
+  },
+  {
     key: 'llm_backend',
     title: $localize`LLM Backend`,
     type: ConfigOptionType.Select,
@@ -363,6 +385,9 @@ export interface PaperlessConfig extends ObjectWithId {
   ai_enabled: boolean
   llm_embedding_backend: string
   llm_embedding_model: string
+  llm_embedding_endpoint: string
+  llm_embedding_chunk_size: number
+  llm_context_size: number
   llm_backend: string
   llm_model: string
   llm_api_key: string
