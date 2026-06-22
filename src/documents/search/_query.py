@@ -149,8 +149,9 @@ DEFAULT_SEARCH_FIELDS = [
     "correspondent",
     "document_type",
     "tag",
+    "bigram_content",
 ]
-SIMPLE_SEARCH_FIELDS = ["simple_title", "simple_content"]
+SIMPLE_SEARCH_FIELDS = ["simple_title", "simple_content", "bigram_content"]
 TITLE_SEARCH_FIELDS = ["simple_title"]
 _CJK_ALL_FIELDS: Final[list[str]] = [
     "bigram_content",
