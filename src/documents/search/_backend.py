@@ -8,6 +8,7 @@ import time
 from datetime import UTC
 from datetime import datetime
 from enum import StrEnum
+from itertools import islice
 from typing import TYPE_CHECKING
 from typing import Final
 from typing import Self
@@ -19,6 +20,7 @@ import filelock
 import regex
 import tantivy
 from django.conf import settings
+from django.contrib.contenttypes.models import ContentType
 from django.utils.timezone import get_current_timezone
 from guardian.shortcuts import get_users_with_perms
 
@@ -387,6 +389,7 @@ class TantivyBackend:
         self,
         document: Document,
         effective_content: str | None = None,
+        viewer_ids: list[int] | None = None,
     ) -> tantivy.Document:
         """Build a tantivy Document from a Django Document instance.
 
@@ -492,12 +495,14 @@ class TantivyBackend:
             doc.add_unsigned("owner_id", document.owner_id)
 
         # Viewers with permission
-        users_with_perms = get_users_with_perms(
-            document,
-            only_with_perms_in=["view_document"],
-        )
-        for user in users_with_perms:
-            doc.add_unsigned("viewer_id", user.pk)
+        if viewer_ids is None:
+            users_with_perms = get_users_with_perms(
+                document,
+                only_with_perms_in=["view_document"],
+            )
+            viewer_ids = [int(u.id) for u in users_with_perms]
+        for viewer_id in viewer_ids:
+            doc.add_unsigned("viewer_id", viewer_id)
 
         # Autocomplete words
         text_sources = [document.title, content]
@@ -922,15 +927,20 @@ class TantivyBackend:
         old_index, old_schema = self._raw_index, self._raw_schema
         self._raw_index = new_index
         self._raw_schema = new_index.schema
-
+        chunk_size = 1000
         try:
             writer = new_index.writer()
-            for document in iter_wrapper(documents):
-                doc = self._build_tantivy_doc(
-                    document,
-                    document.get_effective_content(),
+            for chunk in chunked(iter_wrapper(documents), chunk_size):
+                viewer_map = _bulk_get_viewer_ids(
+                    [doc.pk for doc in chunk],
                 )
-                writer.add_document(doc)
+                for document in chunk:
+                    doc = self._build_tantivy_doc(
+                        document,
+                        document.get_effective_content(),
+                        viewer_ids=viewer_map.get(document.pk, []),
+                    )
+                    writer.add_document(doc)
             writer.commit()
             # Wait for background merge threads to finish so all segments are
             # fully merged and persisted before the index is considered rebuilt.
@@ -941,6 +951,36 @@ class TantivyBackend:
             self._raw_index = old_index
             self._raw_schema = old_schema
             raise
+
+
+def chunked(iterable, size):
+    iterator = iter(iterable)
+    while chunk := list(islice(iterator, size)):
+        yield chunk
+
+
+def _bulk_get_viewer_ids(doc_pks):
+    """Fetch all view_document permissions for a batch of documents in one query."""
+    from collections import defaultdict
+
+    from django.contrib.auth.models import Permission
+    from guardian.models import UserObjectPermission
+
+    from documents.models import Document
+
+    ct = ContentType.objects.get_for_model(Document)
+    perm = Permission.objects.get(content_type=ct, codename="view_document")
+
+    qs = UserObjectPermission.objects.filter(
+        content_type=ct,
+        permission=perm,
+        object_pk__in=[str(pk) for pk in doc_pks],
+    ).values_list("object_pk", "user_id")
+
+    viewer_map = defaultdict(list)
+    for object_pk, user_id in qs:
+        viewer_map[int(object_pk)].append(user_id)
+    return viewer_map
 
 
 # Module-level singleton with proper thread safety
