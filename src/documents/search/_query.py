@@ -448,8 +448,9 @@ DEFAULT_SEARCH_FIELDS = [
     "correspondent",
     "document_type",
     "tag",
+    "bigram_content",
 ]
-SIMPLE_SEARCH_FIELDS = ["simple_title", "simple_content"]
+SIMPLE_SEARCH_FIELDS = ["simple_title", "simple_content", "bigram_content"]
 TITLE_SEARCH_FIELDS = ["simple_title"]
 _FIELD_BOOSTS = {"title": 2.0}
 _SIMPLE_FIELD_BOOSTS = {"simple_title": 2.0}
