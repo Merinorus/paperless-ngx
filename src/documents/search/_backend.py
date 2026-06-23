@@ -73,7 +73,12 @@ def _extract_autocomplete_words(text_sources: list[str]) -> set[str]:
     and ascii-folds each token. Uses the regex library with a timeout to guard against
     ReDoS on untrusted document content.
     """
-    words = set()
+    # Collect unique lowercased tokens first, then ascii-fold only the distinct
+    # ones. Document content repeats words heavily, and every ascii_fold call
+    # crosses into Tantivy's Rust analyzer, so folding per *unique* token instead
+    # of per *occurrence* removes most of that cost during a full reindex. The
+    # resulting set is identical: ascii_fold is a pure function of the token.
+    unique_tokens: set[str] = set()
     for text in text_sources:
         if not text:
             continue
@@ -84,11 +89,9 @@ def _extract_autocomplete_words(text_sources: list[str]) -> set[str]:
                 "Autocomplete word extraction timed out for a text source; skipping.",
             )
             continue
-        for token in tokens:
-            normalized = ascii_fold(token.lower())
-            if normalized:
-                words.add(normalized)
-    return words
+        unique_tokens.update(token.lower() for token in tokens)
+
+    return {normalized for token in unique_tokens if (normalized := ascii_fold(token))}
 
 
 class SearchHit(TypedDict):
@@ -1003,17 +1006,20 @@ def _bulk_get_viewer_ids(doc_pks):
     """Fetch all view_document permissions for a batch of documents in one query."""
     from collections import defaultdict
 
-    from django.contrib.auth.models import Permission
     from guardian.models import UserObjectPermission
 
     from documents.models import Document
 
+    # get_for_model is cached by Django, so this costs at most one query total.
     ct = ContentType.objects.get_for_model(Document)
-    perm = Permission.objects.get(content_type=ct, codename="view_document")
 
+    # Fold the permission lookup into the query via a join on codename instead
+    # of a separate Permission.objects.get(), which would otherwise run once per
+    # chunk during a full reindex.
     qs = UserObjectPermission.objects.filter(
         content_type=ct,
-        permission=perm,
+        permission__content_type=ct,
+        permission__codename="view_document",
         object_pk__in=[str(pk) for pk in doc_pks],
     ).values_list("object_pk", "user_id")
 
