@@ -903,6 +903,7 @@ class TantivyBackend:
         self,
         documents: QuerySet[Document],
         iter_wrapper: IterWrapper[tuple[Document, list[int]]] = identity,
+        writer_heap_bytes: int = 512_000_000,
     ) -> None:
         """
         Rebuild the entire search index from scratch.
@@ -916,6 +917,9 @@ class TantivyBackend:
                 (e.g., progress bar). Wraps an iterable of
                 ``(document, viewer_ids)`` pairs and should yield each pair
                 unchanged, advancing one step per document.
+            writer_heap_bytes: Tantivy writer memory budget (split across the
+                writer's threads). Larger values buffer more docs in RAM before
+                flushing a segment, deferring merge work; they do not avoid it.
         """
         # Create new index (on-disk or in-memory)
         if self._path is not None:
@@ -935,7 +939,7 @@ class TantivyBackend:
         # The stream is Sized, so iter_wrapper can still discover the total.
         documents_stream = _DocumentViewerStream(documents, chunk_size=1000)
         try:
-            writer = new_index.writer()
+            writer = new_index.writer(heap_size=writer_heap_bytes)
             for document in iter_wrapper(documents_stream):
                 doc = self._build_tantivy_doc(
                     document,
