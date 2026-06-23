@@ -39,6 +39,7 @@ from documents.utils import IterWrapper
 from documents.utils import identity
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from django.contrib.auth.models import AbstractUser
@@ -901,7 +902,7 @@ class TantivyBackend:
     def rebuild(
         self,
         documents: QuerySet[Document],
-        iter_wrapper: IterWrapper[Document] = identity,
+        iter_wrapper: IterWrapper[tuple[Document, list[int]]] = identity,
     ) -> None:
         """
         Rebuild the entire search index from scratch.
@@ -912,7 +913,9 @@ class TantivyBackend:
         Args:
             documents: QuerySet of Document instances to index
             iter_wrapper: Optional wrapper function for progress tracking
-                (e.g., progress bar). Should yield each document unchanged.
+                (e.g., progress bar). Wraps an iterable of
+                ``(document, viewer_ids)`` pairs and should yield each pair
+                unchanged, advancing one step per document.
         """
         # Create new index (on-disk or in-memory)
         if self._path is not None:
@@ -927,20 +930,22 @@ class TantivyBackend:
         old_index, old_schema = self._raw_index, self._raw_schema
         self._raw_index = new_index
         self._raw_schema = new_index.schema
-        chunk_size = 1000
+        # Stream documents one-by-one (so the progress bar advances per
+        # document) while fetching viewer permissions one SQL query per chunk.
+        # The stream is Sized, so iter_wrapper can still discover the total.
+        documents_stream = _DocumentViewerStream(documents, chunk_size=1000)
         try:
             writer = new_index.writer()
-            for chunk in chunked(iter_wrapper(documents), chunk_size):
-                viewer_map = _bulk_get_viewer_ids(
-                    [doc.pk for doc in chunk],
+            for document in iter_wrapper(documents_stream):
+                doc = self._build_tantivy_doc(
+                    document,
+                    document.get_effective_content(),
+                    viewer_ids=documents_stream.viewer_ids_by_pk.get(
+                        document.pk,
+                        [],
+                    ),
                 )
-                for document in chunk:
-                    doc = self._build_tantivy_doc(
-                        document,
-                        document.get_effective_content(),
-                        viewer_ids=viewer_map.get(document.pk, []),
-                    )
-                    writer.add_document(doc)
+                writer.add_document(doc)
             writer.commit()
             # Wait for background merge threads to finish so all segments are
             # fully merged and persisted before the index is considered rebuilt.
@@ -957,6 +962,33 @@ def chunked(iterable, size):
     iterator = iter(iterable)
     while chunk := list(islice(iterator, size)):
         yield chunk
+
+
+class _DocumentViewerStream:
+    """Yield documents one-by-one while batch-loading their viewer ids.
+
+    Viewer permissions are fetched one SQL query per chunk (see
+    ``_bulk_get_viewer_ids``), but documents are yielded individually so a
+    progress bar wrapped around this stream advances per document rather than
+    jumping a whole chunk at a time. ``__len__`` lets the progress helper still
+    discover the total (it inspects ``QuerySet``/``Sized``). The viewer ids for
+    the chunk currently being iterated are exposed via ``viewer_ids_by_pk``.
+    """
+
+    def __init__(self, documents: QuerySet[Document], *, chunk_size: int) -> None:
+        self._documents = documents
+        self._chunk_size = chunk_size
+        self.viewer_ids_by_pk: dict[int, list[int]] = {}
+
+    def __len__(self) -> int:
+        return self._documents.count()
+
+    def __iter__(self) -> Iterator[Document]:
+        for chunk in chunked(self._documents, self._chunk_size):
+            self.viewer_ids_by_pk = _bulk_get_viewer_ids(
+                [doc.pk for doc in chunk],
+            )
+            yield from chunk
 
 
 def _bulk_get_viewer_ids(doc_pks):

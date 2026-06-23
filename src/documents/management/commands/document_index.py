@@ -61,11 +61,13 @@ class Command(PaperlessCommand):
                     "storage_path",
                     "owner",
                 ).prefetch_related("tags", "notes", "custom_fields", "versions")
+                total = documents.count()
                 get_backend().rebuild(
                     documents,
-                    iter_wrapper=lambda docs: self.track(
-                        docs,
+                    iter_wrapper=lambda pairs: self.track(
+                        pairs,
                         description="Indexing documents...",
+                        total=total,
                     ),
                 )
                 reset_backend()
