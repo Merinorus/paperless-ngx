@@ -60,7 +60,12 @@ class Command(PaperlessCommand):
                     "document_type",
                     "storage_path",
                     "owner",
-                ).prefetch_related("tags", "notes", "custom_fields", "versions")
+                ).prefetch_related(
+                    "tags",
+                    "notes__user",
+                    "custom_fields__field",
+                    "versions",
+                )
                 total = documents.count()
                 get_backend().rebuild(
                     documents,

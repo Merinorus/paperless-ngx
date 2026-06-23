@@ -984,7 +984,11 @@ class _DocumentViewerStream:
         return self._documents.count()
 
     def __iter__(self) -> Iterator[Document]:
-        for chunk in chunked(self._documents, self._chunk_size):
+        # iterator(chunk_size=…) streams from a server-side cursor instead of
+        # materialising the whole queryset in memory; since Django 4.1 it still
+        # honours prefetch_related, running the prefetches one batch at a time.
+        documents = self._documents.iterator(chunk_size=self._chunk_size)
+        for chunk in chunked(documents, self._chunk_size):
             self.viewer_ids_by_pk = _bulk_get_viewer_ids(
                 [doc.pk for doc in chunk],
             )
