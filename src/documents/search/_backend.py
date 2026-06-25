@@ -17,7 +17,6 @@ from typing import TypeVar
 from typing import cast
 
 import filelock
-import regex
 import tantivy
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
@@ -34,6 +33,7 @@ from documents.search._schema import build_schema
 from documents.search._schema import open_or_rebuild_index
 from documents.search._schema import wipe_index
 from documents.search._tokenizer import ascii_fold
+from documents.search._tokenizer import autocomplete_tokens
 from documents.search._tokenizer import register_tokenizers
 from documents.utils import IterWrapper
 from documents.utils import identity
@@ -54,9 +54,6 @@ _LOCK_RETRY_ATTEMPTS: Final[int] = 4  # total attempts (1 initial + 3 retries)
 _LOCK_BACKOFF_BASE: Final[float] = 1.0  # seconds
 _LOCK_BACKOFF_CAP: Final[float] = 10.0  # seconds
 
-_WORD_RE = regex.compile(r"\w+")
-_AUTOCOMPLETE_REGEX_TIMEOUT = 1.0  # seconds; guards against ReDoS on untrusted content
-
 T = TypeVar("T")
 
 
@@ -69,29 +66,17 @@ class SearchMode(StrEnum):
 def _extract_autocomplete_words(text_sources: list[str]) -> set[str]:
     """Extract and normalize words for autocomplete.
 
-    Splits on non-word characters (matching Tantivy's simple tokenizer), lowercases,
-    and ascii-folds each token. Uses the regex library with a timeout to guard against
-    ReDoS on untrusted document content.
+    Tokenizes with Tantivy's simple analyzer (simple -> lowercase -> ascii_fold)
+    so the extracted words match how document content is indexed, and runs the
+    whole pass in Rust. This replaces a Python regex scan plus per-token folding,
+    which dominated full-reindex CPU time. Tokenizing natively also removes the
+    ReDoS exposure of running a regex over untrusted content.
     """
-    # Collect unique lowercased tokens first, then ascii-fold only the distinct
-    # ones. Document content repeats words heavily, and every ascii_fold call
-    # crosses into Tantivy's Rust analyzer, so folding per *unique* token instead
-    # of per *occurrence* removes most of that cost during a full reindex. The
-    # resulting set is identical: ascii_fold is a pure function of the token.
-    unique_tokens: set[str] = set()
+    words = set()
     for text in text_sources:
-        if not text:
-            continue
-        try:
-            tokens = _WORD_RE.findall(text, timeout=_AUTOCOMPLETE_REGEX_TIMEOUT)
-        except TimeoutError:  # pragma: no cover
-            logger.warning(
-                "Autocomplete word extraction timed out for a text source; skipping.",
-            )
-            continue
-        unique_tokens.update(token.lower() for token in tokens)
-
-    return {normalized for token in unique_tokens if (normalized := ascii_fold(token))}
+        if text:
+            words.update(autocomplete_tokens(text))
+    return words
 
 
 class SearchHit(TypedDict):
