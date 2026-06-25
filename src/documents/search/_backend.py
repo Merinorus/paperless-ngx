@@ -24,6 +24,7 @@ from django.utils.timezone import get_current_timezone
 from guardian.shortcuts import get_users_with_perms
 
 from documents.search._query import build_permission_filter
+from documents.search._query import extract_cjk_text
 from documents.search._query import parse_simple_text_highlight_query
 from documents.search._query import parse_simple_text_query
 from documents.search._query import parse_simple_title_query
@@ -397,10 +398,14 @@ class TantivyBackend:
         doc.add_text("title", document.title)
         doc.add_text("title_sort", document.title)
         doc.add_text("simple_title", document.title)
-        doc.add_text("bigram_title", document.title)
         doc.add_text("content", content)
-        doc.add_text("bigram_content", content)
         doc.add_text("simple_content", content)
+        # Bigram (character-ngram) fields exist for CJK substring search,
+        # no need to bloat the bigram index with latin characters.
+        if cjk_title := extract_cjk_text(document.title):
+            doc.add_text("bigram_title", cjk_title)
+        if content and (cjk_content := extract_cjk_text(content)):
+            doc.add_text("bigram_content", cjk_content)
 
         # Original filename - only add if not None/empty
         if document.original_filename:
@@ -410,14 +415,16 @@ class TantivyBackend:
         if document.correspondent:
             doc.add_text("correspondent", document.correspondent.name)
             doc.add_text("correspondent_sort", document.correspondent.name)
-            doc.add_text("bigram_correspondent", document.correspondent.name)
+            if cjk_corr := extract_cjk_text(document.correspondent.name):
+                doc.add_text("bigram_correspondent", cjk_corr)
             doc.add_unsigned("correspondent_id", document.correspondent_id)
 
         # Document type
         if document.document_type:
             doc.add_text("document_type", document.document_type.name)
             doc.add_text("type_sort", document.document_type.name)
-            doc.add_text("bigram_document_type", document.document_type.name)
+            if cjk_type := extract_cjk_text(document.document_type.name):
+                doc.add_text("bigram_document_type", cjk_type)
             doc.add_unsigned("document_type_id", document.document_type_id)
 
         # Storage path
@@ -429,7 +436,8 @@ class TantivyBackend:
         tag_names: list[str] = []
         for tag in document.tags.all():
             doc.add_text("tag", tag.name)
-            doc.add_text("bigram_tag", tag.name)
+            if cjk_tag := extract_cjk_text(tag.name):
+                doc.add_text("bigram_tag", cjk_tag)
             doc.add_unsigned("tag_id", tag.pk)
             tag_names.append(tag.name)
 
