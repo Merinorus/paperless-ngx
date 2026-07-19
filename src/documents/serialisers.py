@@ -25,6 +25,7 @@ from django.core.validators import MinValueValidator
 from django.core.validators import RegexValidator
 from django.core.validators import integer_validator
 from django.db.models import Count
+from django.db.models import Prefetch
 from django.db.models import Q
 from django.db.models.functions import Lower
 from django.utils import timezone
@@ -1327,7 +1328,24 @@ class SearchResultSerializer(DocumentSerializer):
                 "document_type",
                 "owner",
             )
-            .prefetch_related("tags", "custom_fields", "notes")
+            .prefetch_related(
+                Prefetch(
+                    "versions",
+                    queryset=Document.objects.only(
+                        "id",
+                        "added",
+                        "checksum",
+                        "version_label",
+                        "root_document_id",
+                    ),
+                ),
+                "tags",
+                Prefetch(
+                    "custom_fields",
+                    queryset=CustomFieldInstance.objects.select_related("field"),
+                ),
+                "notes",
+            )
             .filter(id__in=ids)
         }
 
