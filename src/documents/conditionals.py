@@ -129,14 +129,18 @@ def thumbnail_etag(request: Request, pk: int) -> str | None:
 
 
 def thumbnail_last_modified(request: Request, pk: int) -> datetime | None:
+    doc = resolve_effective_document_by_pk(pk, request).document
+    if doc is None:
+        return None
+    return document_thumbnail_last_modified(doc)
+
+
+def document_thumbnail_last_modified(doc: Document) -> datetime | None:
     """
     Returns the filesystem last modified either from cache or from filesystem.
     Cache should be (slightly?) faster than filesystem
     """
     try:
-        doc = resolve_effective_document_by_pk(pk, request).document
-        if doc is None:
-            return None
         if not doc.thumbnail_path.exists():
             return None
         # Use the effective document id for cache key

@@ -14,6 +14,7 @@ from documents.conditionals import preview_etag
 from documents.conditionals import thumbnail_etag
 from documents.conditionals import thumbnail_last_modified
 from documents.models import Document
+from documents.serialisers import DocumentSerializer
 from documents.versioning import resolve_effective_document_by_pk
 from paperless_testing.dirs import DirectoriesMixin
 
@@ -134,3 +135,29 @@ class TestConditionals(DirectoriesMixin, TestCase):
 
         self.assertIsNotNone(result)
         get_thumb_key.assert_called_once_with(latest.id)
+
+    def test_thumb_rev_reuses_prefetched_versions(self) -> None:
+        root = Document.objects.create(
+            title="root",
+            checksum="root",
+            mime_type="application/pdf",
+        )
+        latest = Document.objects.create(
+            title="latest",
+            checksum="latest",
+            mime_type="application/pdf",
+            root_document=root,
+            version_index=1,
+        )
+        latest.thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
+        latest.thumbnail_path.write_bytes(b"thumb")
+        request = cast("Request", SimpleNamespace(query_params={}, method="GET"))
+        serializer = DocumentSerializer(context={"request": request})
+        # The request-based path resolves the latest thumbnail independently.
+        with mock.patch.object(request, "query_params", {"version": str(latest.id)}):
+            expected = serializer.get_thumb_rev(root)
+
+        prefetched_root = Document.objects.prefetch_related("versions").get(pk=root.pk)
+        with CaptureQueriesContext(connection) as ctx:
+            self.assertEqual(serializer.get_thumb_rev(prefetched_root), expected)
+        self.assertEqual(len(ctx.captured_queries), 0)
