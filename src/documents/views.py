@@ -10,6 +10,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timedelta
+from functools import wraps
 from http import HTTPStatus
 from pathlib import Path
 from time import mktime
@@ -273,6 +274,40 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("paperless.api")
+
+
+def cache_if_given_query_parameter(
+    query_param: str,
+    *,
+    max_age=31536000,
+    private=False,
+):
+    """
+    Add a long cache control strategy only if a specified query parameter  is in the request.
+
+    E.g.: if query_param = "v", an URL containing the query parameter "?v=..." will be cached.
+    """
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, request, *args, **kwargs):
+            response = func(self, request, *args, **kwargs)
+            if response is not None:
+                parts = list()
+                if query_param in request.query_params:
+                    parts.append(f"max-age={max_age}")
+                    parts.append("immutable")
+                    if private:
+                        parts.append("private")
+                else:
+                    parts.append("no-cache")
+                response["Cache-Control"] = ", ".join(parts)
+            return response
+
+        return wrapper
+
+    return decorator
+
 
 # Crossover point for intersect_and_order: below this count use a targeted
 # IN-clause query; at or above this count fall back to a full-table scan +
@@ -1700,7 +1735,7 @@ class DocumentViewSet(
             raise Http404
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @cache_if_given_query_parameter("thumb-rev", private=True)
     @method_decorator(
         condition(
             etag_func=thumbnail_etag,

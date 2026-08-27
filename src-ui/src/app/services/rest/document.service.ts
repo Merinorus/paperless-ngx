@@ -228,10 +228,17 @@ export class DocumentService extends AbstractPaperlessService<Document> {
     return url.toString()
   }
 
-  getThumbUrl(id: number, versionID: number = null): string {
+  getThumbUrl(
+    id: number,
+    versionID: number = null,
+    thumbRev: string = null
+  ): string {
     let url = new URL(this.getResourceUrl(id, 'thumb'))
     if (versionID) {
       url.searchParams.append('version', versionID.toString())
+    }
+    if (thumbRev) {
+      url.searchParams.append('thumb-rev', thumbRev)
     }
     return url.toString()
   }
