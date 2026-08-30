@@ -1816,6 +1816,10 @@ class DeleteDocumentsSerializer(DocumentSelectionSerializer):
 
 class ReprocessDocumentsSerializer(DocumentSelectionSerializer):
     remote_ocr = serializers.BooleanField(required=False, default=False)
+    remote_ocr_mode = serializers.ChoiceField(
+        choices=("local", "configured", "remote"),
+        required=False,
+    )
 
 
 class BulkEditSerializer(
@@ -2163,6 +2167,15 @@ class BulkEditSerializer(
                 raise serializers.ValidationError("remote_ocr must be a boolean")
         else:
             parameters["remote_ocr"] = False
+        remote_ocr_mode = parameters.get("remote_ocr_mode")
+        if remote_ocr_mode and remote_ocr_mode not in {
+            "local",
+            "configured",
+            "remote",
+        }:
+            raise serializers.ValidationError(
+                "remote_ocr_mode must be local, configured, or remote",
+            )
 
     def validate_parameters_remove_password(self, parameters):
         if "password" not in parameters:

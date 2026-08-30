@@ -25,6 +25,7 @@ from django.conf import settings
 
 from documents.parsers import ParseError
 from paperless.parsers.utils import extract_pdf_text
+from paperless.parsers.utils import pdf_born_digital_text
 from paperless.parsers.utils import post_process_text
 from paperless.version import __full_version_str__
 
@@ -156,7 +157,8 @@ class RemoteDocumentParser:
         filename:
             Original filename including extension.
         path:
-            Optional filesystem path. Not inspected by this parser.
+            Optional filesystem path. In ``auto`` mode PDFs are inspected for
+            embedded text and declined when they are born-digital.
 
         Returns
         -------
@@ -168,6 +170,39 @@ class RemoteDocumentParser:
         if not config.engine_is_valid():
             return None
         if mime_type not in _SUPPORTED_MIME_TYPES:
+            return None
+
+        from paperless.config import RemoteOCRConfig
+        from paperless.models import RemoteOCRMode
+
+        if (
+            RemoteOCRConfig().remote_ocr_mode == RemoteOCRMode.AUTO
+            and mime_type == "application/pdf"
+        ):
+            if path is None:
+                logger.warning(
+                    "Remote OCR auto mode cannot inspect PDF without a path; "
+                    "processing it locally",
+                )
+                return None
+            _, born_digital = pdf_born_digital_text(path, log=logger)
+            if born_digital:
+                logger.debug(
+                    "Remote OCR: born-digital with auto mode, fallback to local OCR engine",
+                )
+                return None
+        return 20
+
+    @classmethod
+    def score_forced(
+        cls,
+        mime_type: str,
+        filename: str,
+        path: Path | None = None,
+    ) -> int | None:
+        """Score an explicit remote-OCR request without applying auto mode."""
+        config = RemoteEngineConfig.from_app_config()
+        if not config.engine_is_valid() or mime_type not in _SUPPORTED_MIME_TYPES:
             return None
         return 20
 

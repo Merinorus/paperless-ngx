@@ -556,6 +556,25 @@ class TestBulkEditAPI(DirectoriesMixin, APITestCase):
         self.assertEqual(args[0], [self.doc1.id])
         self.assertEqual(kwargs, {"remote_ocr": True})
 
+    @mock.patch("documents.views.bulk_edit.reprocess")
+    def test_reprocess_documents_endpoint_remote_ocr_mode(self, m) -> None:
+        self.setup_mock(m, "reprocess")
+        response = self.client.post(
+            "/api/documents/reprocess/",
+            json.dumps(
+                {"documents": [self.doc1.id], "remote_ocr_mode": "local"},
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        args, kwargs = m.call_args
+        self.assertEqual(args[0], [self.doc1.id])
+        self.assertEqual(
+            kwargs,
+            {"remote_ocr": False, "remote_ocr_mode": "local"},
+        )
+
     @mock.patch("documents.serialisers.bulk_edit.set_storage_path")
     def test_api_set_storage_path(self, m) -> None:
         """

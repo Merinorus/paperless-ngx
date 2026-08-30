@@ -216,13 +216,14 @@ class RemoteOCRConfig(BaseConfig):
     @property
     def remote_ocr_by_default(self) -> bool:
         """
-        Whether every supported document goes to the remote engine.
+        Whether documents are eligible for the remote engine by default.
 
-        When False the remote engine is used only for documents that
+        In auto mode the remote parser makes the final decision based on whether
+        a PDF already has embedded text. When False the remote engine is used only for documents that
         explicitly asked for it, i.e. a workflow matched during consumption or
         the user ticked the box when reprocessing.
         """
-        return self.remote_ocr_mode == RemoteOCRMode.ALWAYS
+        return self.remote_ocr_mode in {RemoteOCRMode.ALWAYS, RemoteOCRMode.AUTO}
 
 
 @dataclasses.dataclass

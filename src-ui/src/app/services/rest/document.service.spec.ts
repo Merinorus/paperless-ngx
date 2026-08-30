@@ -284,21 +284,21 @@ describe(`DocumentService`, () => {
     expect(req.request.method).toEqual('POST')
     expect(req.request.body).toEqual({
       documents: ids,
-      remote_ocr: false,
+      remote_ocr_mode: 'configured',
     })
   })
 
   it('should request remote OCR when reprocessing with it enabled', () => {
     const ids = [1, 2, 3]
     subscription = service
-      .reprocessDocuments({ documents: ids }, true)
+      .reprocessDocuments({ documents: ids }, 'remote')
       .subscribe()
     const req = httpTestingController.expectOne(
       `${environment.apiBaseUrl}${endpoint}/reprocess/`
     )
     expect(req.request.body).toEqual({
       documents: ids,
-      remote_ocr: true,
+      remote_ocr_mode: 'remote',
     })
   })
 
