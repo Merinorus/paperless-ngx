@@ -1543,7 +1543,7 @@ export class DocumentDetailComponent
       this.documentsService
         .reprocessDocuments(
           { documents: [this.document().id] },
-          modal.componentInstance.remoteOcr
+          modal.componentInstance.remoteOcrMode
         )
         .subscribe({
           next: () => {

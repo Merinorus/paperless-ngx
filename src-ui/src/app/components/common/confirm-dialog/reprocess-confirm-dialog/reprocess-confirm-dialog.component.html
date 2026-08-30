@@ -11,10 +11,20 @@
     <p class="mb-0 text-break" [innerHTML]="message"></p>
   }
   @if (showRemoteOcr) {
-    <div class="form-check mt-3">
-      <input class="form-check-input" type="checkbox" id="reprocessRemoteOcr" [(ngModel)]="remoteOcr" />
-      <label class="form-check-label" for="reprocessRemoteOcr" i18n>Use remote OCR</label>
-      <div class="form-text" i18n>Sends the document to the configured remote OCR service, which may incur costs.</div>
+    <div class="mt-3">
+      <div class="form-check">
+        <input class="form-check-input" type="radio" id="reprocessRemoteOcrLocal" name="remoteOcrMode" value="local" [(ngModel)]="remoteOcrMode" />
+        <label class="form-check-label" for="reprocessRemoteOcrLocal" i18n>Use local OCR</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="radio" id="reprocessRemoteOcrRemote" name="remoteOcrMode" value="remote" [(ngModel)]="remoteOcrMode" />
+        <label class="form-check-label" for="reprocessRemoteOcrRemote" i18n>Use remote OCR</label>
+      </div>
+      <div class="form-check">
+        <input class="form-check-input" type="radio" id="reprocessRemoteOcrConfigured" name="remoteOcrMode" value="configured" [(ngModel)]="remoteOcrMode" />
+        <label class="form-check-label" for="reprocessRemoteOcrConfigured" i18n>Follow settings</label>
+      </div>
+      <div class="form-text" i18n>Follow settings applies the configured remote OCR mode. Choosing remote OCR may incur costs.</div>
     </div>
   }
 </div>

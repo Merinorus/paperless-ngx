@@ -936,7 +936,7 @@ export class BulkEditorComponent
           modal,
           this.documentService.reprocessDocuments(
             this.getSelectionQuery(),
-            modal.componentInstance.remoteOcr
+            modal.componentInstance.remoteOcrMode
           )
         )
       })
