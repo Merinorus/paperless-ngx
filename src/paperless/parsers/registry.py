@@ -336,6 +336,7 @@ class ParserRegistry:
         path: Path | None = None,
         *,
         allow_remote: bool = True,
+        force_remote: bool = False,
     ) -> type[ParserProtocol] | None:
         """Return the best parser class for the given file, or None.
 
@@ -366,6 +367,9 @@ class ParserRegistry:
             are excluded from consideration, so a document is never sent to
             a remote service. Parsers that do not declare the attribute
             are treated as local and are always considered.
+        force_remote:
+            When True, remote parsers may provide ``score_forced()`` to bypass
+            automatic selection rules for an explicit remote OCR request.
 
         Returns
         -------
@@ -388,7 +392,12 @@ class ParserRegistry:
             ):
                 continue
 
-            score = parser_class.score(mime_type, filename, path)
+            is_remote = getattr(parser_class, "uses_remote_service", False)
+            if force_remote and is_remote:
+                score_method = getattr(parser_class, "score_forced", parser_class.score)
+            else:
+                score_method = parser_class.score
+            score = score_method(mime_type, filename, path)
             if score is None:
                 continue
 

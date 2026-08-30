@@ -1646,6 +1646,8 @@ class TestConsumerRemoteOCR(
         self.assertTrue(
             self._consume(overrides=DocumentMetadataOverrides(remote_ocr=True)),
         )
+        _, kwargs = self.mock_registry.return_value.get_parser_for_file.call_args
+        self.assertTrue(kwargs["force_remote"])
 
 
 class TestMetadataOverrides(TestCase):
