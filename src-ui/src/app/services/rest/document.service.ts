@@ -351,11 +351,11 @@ export class DocumentService extends AbstractPaperlessService<Document> {
 
   reprocessDocuments(
     selection: DocumentSelectionQuery,
-    remoteOcr: boolean = false
+    remoteOcrMode: 'local' | 'configured' | 'remote' = 'configured'
   ) {
     return this.http.post(this.getResourceUrl(null, 'reprocess'), {
       ...selection,
-      remote_ocr: remoteOcr,
+      remote_ocr_mode: remoteOcrMode,
     })
   }
 

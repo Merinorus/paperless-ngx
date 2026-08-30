@@ -435,7 +435,7 @@ describe('SettingsService', () => {
         ).name
     ).toEqual(customFields[0].name)
   })
-  it('should offer remote OCR only when configured and selective', () => {
+  it('should offer remote OCR choices when configured', () => {
     settingsService.set(SETTINGS_KEYS.REMOTE_OCR_CONFIGURED, false)
     settingsService.set(
       SETTINGS_KEYS.REMOTE_OCR_MODE,
@@ -443,17 +443,10 @@ describe('SettingsService', () => {
     )
     expect(settingsService.remoteOCRIsSelectable).toBeFalsy()
 
-    // configured, but already handling every document
     settingsService.set(SETTINGS_KEYS.REMOTE_OCR_CONFIGURED, true)
     settingsService.set(
       SETTINGS_KEYS.REMOTE_OCR_MODE,
       RemoteOCRModeConfig.ALWAYS
-    )
-    expect(settingsService.remoteOCRIsSelectable).toBeFalsy()
-
-    settingsService.set(
-      SETTINGS_KEYS.REMOTE_OCR_MODE,
-      RemoteOCRModeConfig.WORKFLOW_ONLY
     )
     expect(settingsService.remoteOCRIsSelectable).toBeTruthy()
   })
