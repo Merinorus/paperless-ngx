@@ -22,6 +22,7 @@ import pytest
 
 from documents.parsers import ParseError
 from paperless.models import ApplicationConfiguration
+from paperless.models import RemoteOCRMode
 from paperless.parsers import ParserContext
 from paperless.parsers import ParserProtocol
 from paperless.parsers.remote import RemoteDocumentParser
@@ -227,6 +228,69 @@ class TestRemoteParserScore:
         """Remote parser (20) outranks the tesseract default (10) when configured."""
         score = RemoteDocumentParser.score("application/pdf", "doc.pdf")
         assert score is not None and score > 10
+
+    def test_auto_mode_declines_pdf_with_embedded_text(
+        self,
+        azure_settings: SettingsWrapper,
+        simple_digital_pdf_file: Path,
+    ) -> None:
+        azure_settings.REMOTE_OCR_MODE = RemoteOCRMode.AUTO
+
+        assert (
+            RemoteDocumentParser.score(
+                "application/pdf",
+                "document.pdf",
+                simple_digital_pdf_file,
+            )
+            is None
+        )
+
+    def test_auto_mode_accepts_pdf_without_embedded_text(
+        self,
+        azure_settings: SettingsWrapper,
+        tmp_path: Path,
+        mocker: MockerFixture,
+    ) -> None:
+        azure_settings.REMOTE_OCR_MODE = RemoteOCRMode.AUTO
+        document_path = tmp_path / "scan.pdf"
+        document_path.touch()
+        mocker.patch(
+            "paperless.parsers.remote.pdf_born_digital_text",
+            return_value=(None, False),
+        )
+
+        assert (
+            RemoteDocumentParser.score(
+                "application/pdf",
+                "scan.pdf",
+                document_path,
+            )
+            == 20
+        )
+
+    def test_auto_mode_accepts_images(
+        self,
+        azure_settings: SettingsWrapper,
+    ) -> None:
+        azure_settings.REMOTE_OCR_MODE = RemoteOCRMode.AUTO
+
+        assert RemoteDocumentParser.score("image/jpeg", "scan.jpg") == 20
+
+    def test_forced_score_accepts_pdf_with_embedded_text(
+        self,
+        azure_settings: SettingsWrapper,
+        simple_digital_pdf_file: Path,
+    ) -> None:
+        azure_settings.REMOTE_OCR_MODE = RemoteOCRMode.AUTO
+
+        assert (
+            RemoteDocumentParser.score_forced(
+                "application/pdf",
+                "document.pdf",
+                simple_digital_pdf_file,
+            )
+            == 20
+        )
 
     @pytest.mark.django_db
     def test_score_uses_app_config_when_env_unset(
@@ -615,6 +679,40 @@ class TestRemoteParserRegistry:
 
         registry = get_parser_registry()
         parser_cls = registry.get_parser_for_file("application/pdf", "doc.pdf")
+
+        assert parser_cls is RemoteDocumentParser
+
+    def test_auto_mode_uses_local_parser_for_pdf_with_embedded_text(
+        self,
+        azure_settings: SettingsWrapper,
+        simple_digital_pdf_file: Path,
+    ) -> None:
+        from paperless.parsers.registry import get_parser_registry
+        from paperless.parsers.tesseract import RasterisedDocumentParser
+
+        azure_settings.REMOTE_OCR_MODE = RemoteOCRMode.AUTO
+        parser_cls = get_parser_registry().get_parser_for_file(
+            "application/pdf",
+            "document.pdf",
+            simple_digital_pdf_file,
+        )
+
+        assert parser_cls is RasterisedDocumentParser
+
+    def test_explicit_remote_ocr_overrides_auto_mode_for_pdf_with_text(
+        self,
+        azure_settings: SettingsWrapper,
+        simple_digital_pdf_file: Path,
+    ) -> None:
+        from paperless.parsers.registry import get_parser_registry
+
+        azure_settings.REMOTE_OCR_MODE = RemoteOCRMode.AUTO
+        parser_cls = get_parser_registry().get_parser_for_file(
+            "application/pdf",
+            "document.pdf",
+            simple_digital_pdf_file,
+            force_remote=True,
+        )
 
         assert parser_cls is RemoteDocumentParser
 
