@@ -1,4 +1,3 @@
-import itertools
 import logging
 import os
 import platform
@@ -8,8 +7,10 @@ import zipfile
 from collections import defaultdict
 from collections import deque
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timedelta
+from functools import wraps
 from http import HTTPStatus
 from pathlib import Path
 from time import mktime
@@ -181,7 +182,7 @@ from documents.permissions import permitted_document_ids
 from documents.permissions import permitted_object_ids
 from documents.permissions import set_permissions_for_object
 from documents.permissions import user_is_unrestricted
-from documents.plugins.date_parsing import get_date_parser
+from documents.plugins.date_parsing import get_date_parser, parse_date_set
 from documents.schema import generate_object_with_permissions_schema
 from documents.search import SearchHit
 from documents.serialisers import AcknowledgeTasksViewSerializer
@@ -275,6 +276,40 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("paperless.api")
+
+
+def cache_if_given_query_parameter(
+    query_param: str,
+    *,
+    max_age=31536000,
+    private=False,
+):
+    """
+    Add a long cache control strategy only if a specified query parameter  is in the request.
+
+    E.g.: if query_param = "v", an URL containing the query parameter "?v=..." will be cached.
+    """
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, request, *args, **kwargs):
+            response = func(self, request, *args, **kwargs)
+            if response is not None:
+                parts = list()
+                if query_param in request.query_params:
+                    parts.append(f"max-age={max_age}")
+                    parts.append("immutable")
+                    if private:
+                        parts.append("private")
+                else:
+                    parts.append("no-cache")
+                response["Cache-Control"] = ", ".join(parts)
+            return response
+
+        return wrapper
+
+    return decorator
+
 
 # Crossover point for intersect_and_order: below this count use a targeted
 # IN-clause query; at or above this count fall back to a full-table scan +
@@ -1395,7 +1430,7 @@ class DocumentViewSet(
         return None
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=5, max_stale=60))
     @method_decorator(
         condition(etag_func=metadata_etag, last_modified_func=metadata_last_modified),
     )
@@ -1456,7 +1491,7 @@ class DocumentViewSet(
         return Response(meta)
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=600, max_stale=3600 * 24))
     @method_decorator(
         condition(
             etag_func=suggestions_etag,
@@ -1485,18 +1520,13 @@ class DocumentViewSet(
 
         dates = []
         if settings.NUMBER_OF_SUGGESTED_DATES > 0:
-            with get_date_parser() as date_parser:
-                gen = date_parser.parse(doc.filename, doc.content)
-                dates = sorted(
-                    {
-                        i
-                        for i in itertools.islice(
-                            gen,
-                            settings.NUMBER_OF_SUGGESTED_DATES,
-                        )
-                    },
+            with ThreadPoolExecutor() as executor:
+                future_dates = executor.submit(
+                    parse_date_set,
+                    doc.filename,
+                    doc.content,
+                    settings.NUMBER_OF_SUGGESTED_DATES,
                 )
-
         resp_data = {
             "correspondents": [
                 c.id for c in match_correspondents(doc, classifier, request.user)
@@ -1508,8 +1538,14 @@ class DocumentViewSet(
             "storage_paths": [
                 dt.id for dt in match_storage_paths(doc, classifier, request.user)
             ],
-            "dates": [date.strftime("%Y-%m-%d") for date in dates if date is not None],
+            "dates": [],
         }
+        if settings.NUMBER_OF_SUGGESTED_DATES > 0:
+            dates = future_dates.result()
+            if dates:
+                resp_data["dates"] = [
+                    date.strftime("%Y-%m-%d") for date in dates if date is not None
+                ]
 
         # Cache the suggestions and the classifier hash for later
         set_suggestions_cache(doc.pk, resp_data, classifier)
@@ -1522,7 +1558,7 @@ class DocumentViewSet(
         filter_backends=[],
         url_path="ai_suggestions",
     )
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=10, max_stale=3600 * 24))
     def ai_suggestions(self, request, pk=None):
         doc = get_object_or_404(
             Document.objects.select_related("owner").prefetch_related("versions"),
@@ -1687,7 +1723,7 @@ class DocumentViewSet(
         return Response(resp_data)
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=60, max_stale=3600 * 24 * 31))
     @method_decorator(
         condition(etag_func=preview_etag, last_modified_func=preview_last_modified),
     )
@@ -1713,7 +1749,7 @@ class DocumentViewSet(
             raise Http404
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @cache_if_given_query_parameter("thumb-rev", private=True)
     @method_decorator(
         condition(
             etag_func=thumbnail_etag,
@@ -3828,6 +3864,7 @@ class GlobalSearchView(PassUserMixin):
 class StatisticsView(GenericAPIView[Any]):
     permission_classes = (IsAuthenticated,)
 
+    @method_decorator(cache_control(max_age=60, max_stale=600))
     def get(self, request, format=None):
         user = request.user if request.user is not None else None
         can_view_global_stats = has_global_statistics_permission(user) or user is None

@@ -537,9 +537,18 @@ export class DocumentDetailComponent
             }`
           ),
       })
-    this.thumbUrl.set(
-      this.documentsService.getThumbUrl(this.selectedVersionId())
+    // Load the thumbnail with specified revision if available from the list view
+    const docFromList = this.documentListViewService.documents.find(
+      (doc) => doc.id === documentId
     )
+    this.thumbUrl.set(
+      this.documentsService.getThumbUrl(
+        documentId,
+        null,
+        docFromList?.thumb_rev
+      )
+    )
+
     this.documentsService
       .get(documentId)
       .pipe(
@@ -583,6 +592,16 @@ export class DocumentDetailComponent
           const openDocument = this.openDocumentService.getOpenDocument(
             this.documentId()
           )
+          if (
+            docFromList?.thumb_rev &&
+            docFromList.thumb_rev != doc.thumb_rev
+          ) {
+            // The document's thumbnail has been refreshed in the meantime,
+            // so we need to update it in our local list.
+            // No need to fetch the actual new thumbnail now,
+            // as the preview will quickly replace it.
+            docFromList.thumb_rev = doc.thumb_rev
+          }
           // update duplicate documents if present
           if (openDocument && doc?.duplicate_documents) {
             openDocument.duplicate_documents = doc.duplicate_documents
@@ -1417,7 +1436,7 @@ export class DocumentDetailComponent
       this.documentsService
         .reprocessDocuments(
           { documents: [this.document().id] },
-          modal.componentInstance.remoteOcr
+          modal.componentInstance.remoteOcrMode
         )
         .subscribe({
           next: () => {

@@ -1211,7 +1211,7 @@ REMOTE_OCR_API_KEY = os.getenv("PAPERLESS_REMOTE_OCR_API_KEY")
 REMOTE_OCR_ENDPOINT = os.getenv("PAPERLESS_REMOTE_OCR_ENDPOINT")
 REMOTE_OCR_MODE = get_choice_from_env(
     "PAPERLESS_REMOTE_OCR_MODE",
-    {"always", "workflow_only"},
+    {"always", "auto", "workflow_only"},
     default="always",
 )
 REMOTE_OCR_ALLOW_INTERNAL_ENDPOINTS = get_bool_from_env(

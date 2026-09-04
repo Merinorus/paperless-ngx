@@ -466,6 +466,7 @@ class ConsumerPlugin(
                     self.filename,
                     self.working_copy,
                     allow_remote=allow_remote,
+                    force_remote=self.metadata.remote_ocr,
                 )
             )
             if not parser_class:

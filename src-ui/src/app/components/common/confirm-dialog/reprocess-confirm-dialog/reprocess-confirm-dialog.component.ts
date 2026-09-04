@@ -11,10 +11,9 @@ import { ConfirmDialogComponent } from '../confirm-dialog.component'
 export class ReprocessConfirmDialogComponent extends ConfirmDialogComponent {
   private settings = inject(SettingsService)
 
-  remoteOcr: boolean = false
+  remoteOcrMode: 'local' | 'configured' | 'remote' = 'configured'
 
   public get showRemoteOcr(): boolean {
-    // Hidden when it is not configured, or when it already handles every document anyway.
     return this.settings.remoteOCRIsSelectable
   }
 }

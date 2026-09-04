@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
+from base64 import urlsafe_b64encode
 from datetime import datetime
 from datetime import timedelta
 from decimal import Decimal
@@ -54,6 +56,7 @@ if settings.AUDIT_LOG_ENABLED:
 
 
 from documents import bulk_edit
+from documents.conditionals import thumbnail_last_modified
 from documents.data_models import DocumentSource
 from documents.filters import CustomFieldQueryParser
 from documents.models import Correspondent
@@ -1061,6 +1064,7 @@ class DocumentSerializer(
     duplicate_documents = SerializerMethodField()
 
     notes = NotesSerializer(many=True, required=False, read_only=True)
+    thumb_rev = SerializerMethodField(allow_null=False, read_only=True)
     root_document: RelatedField[Document, Document, Any] | ManyRelatedField = (
         serializers.PrimaryKeyRelatedField(read_only=True)
     )
@@ -1146,6 +1150,18 @@ class DocumentSerializer(
             return obj.get_public_filename(archive=True)
         else:
             return None
+
+    def get_thumb_rev(self, obj) -> str:
+        """
+        Return a short hash of the thumbnail, derived from its last modified time.
+
+        This is used to force cache refresh when a thumbnail is modified.
+        """
+        request = self.context["request"]
+        message = f"{obj.pk}{thumbnail_last_modified(request, obj.pk)}"
+        checksum = hashlib.md5(message.encode()).digest()
+        # 16 bits is enough to avoid collision risk when reprocessing a thumbnail
+        return urlsafe_b64encode(checksum[-2:]).decode().rstrip("=")
 
     def to_representation(self, instance):
         doc = super().to_representation(instance)
@@ -1315,6 +1331,7 @@ class DocumentSerializer(
             "mime_type",
             "root_document",
             "versions",
+            "thumb_rev",
         )
         list_serializer_class = OwnedObjectListSerializer
 
@@ -1799,6 +1816,10 @@ class DeleteDocumentsSerializer(DocumentSelectionSerializer):
 
 class ReprocessDocumentsSerializer(DocumentSelectionSerializer):
     remote_ocr = serializers.BooleanField(required=False, default=False)
+    remote_ocr_mode = serializers.ChoiceField(
+        choices=("local", "configured", "remote"),
+        required=False,
+    )
 
 
 class BulkEditSerializer(
@@ -2146,6 +2167,15 @@ class BulkEditSerializer(
                 raise serializers.ValidationError("remote_ocr must be a boolean")
         else:
             parameters["remote_ocr"] = False
+        remote_ocr_mode = parameters.get("remote_ocr_mode")
+        if remote_ocr_mode and remote_ocr_mode not in {
+            "local",
+            "configured",
+            "remote",
+        }:
+            raise serializers.ValidationError(
+                "remote_ocr_mode must be local, configured, or remote",
+            )
 
     def validate_parameters_remove_password(self, parameters):
         if "password" not in parameters:
