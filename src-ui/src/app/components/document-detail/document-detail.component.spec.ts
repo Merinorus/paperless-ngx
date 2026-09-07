@@ -963,7 +963,10 @@ describe('DocumentDetailComponent', () => {
     component.reprocess()
     const modalCloseSpy = jest.spyOn(openModal, 'close')
     openModal.componentInstance.confirmClicked.next()
-    expect(reprocessSpy).toHaveBeenCalledWith({ documents: [doc.id] }, false)
+    expect(reprocessSpy).toHaveBeenCalledWith(
+      { documents: [doc.id] },
+      'configured'
+    )
     expect(modalSpy).toHaveBeenCalled()
     expect(toastSpy).toHaveBeenCalled()
     expect(modalCloseSpy).toHaveBeenCalled()
@@ -976,9 +979,9 @@ describe('DocumentDetailComponent', () => {
     let openModal: NgbModalRef
     modalService.activeInstances.subscribe((modal) => (openModal = modal[0]))
     component.reprocess()
-    openModal.componentInstance.remoteOcr = true
+    openModal.componentInstance.remoteOcrMode = 'remote'
     openModal.componentInstance.confirmClicked.next()
-    expect(reprocessSpy).toHaveBeenCalledWith({ documents: [doc.id] }, true)
+    expect(reprocessSpy).toHaveBeenCalledWith({ documents: [doc.id] }, 'remote')
   })
 
   it('should show error if redo ocr call fails', () => {
@@ -1938,7 +1941,7 @@ describe('DocumentDetailComponent', () => {
     httpTestingController.expectOne(component.previewUrl()).flush('preview')
 
     previewSpy.mockReturnValueOnce('preview-version')
-    jest.spyOn(documentService, 'getThumbUrl').mockReturnValue('thumb-version')
+    jest.spyOn(documentService, 'getThumbUrl').mockReturnValue('thumb-rev')
     jest
       .spyOn(documentService, 'get')
       .mockReturnValue(of({ content: 'version-content' } as Document))
@@ -1947,7 +1950,7 @@ describe('DocumentDetailComponent', () => {
     httpTestingController.expectOne('preview-version').flush('version text')
 
     expect(component.previewUrl()).toBe('preview-version')
-    expect(component.thumbUrl()).toBe('thumb-version')
+    expect(component.thumbUrl()).toBe('thumb-rev')
     expect(component.previewText()).toBe('version text')
     expect(component.documentForm.get('content').value).toBe('version-content')
     expect(component.pdfSource()).toBe('preview-version')

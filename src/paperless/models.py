@@ -88,6 +88,7 @@ class RemoteOCRMode(models.TextChoices):
     """
 
     ALWAYS = ("always", _("All supported documents"))
+    AUTO = ("auto", _("Only for documents with no embedded text"))
     WORKFLOW_ONLY = ("workflow_only", _("Only when a workflow enables it"))
 
 

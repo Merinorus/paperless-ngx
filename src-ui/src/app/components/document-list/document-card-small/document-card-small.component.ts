@@ -111,7 +111,11 @@ export class DocumentCardSmallComponent
   }
 
   getThumbUrl() {
-    return this.documentService.getThumbUrl(this.document().id)
+    return this.documentService.getThumbUrl(
+      this.document().id,
+      null,
+      this.document().thumb_rev
+    )
   }
 
   getDownloadUrl() {

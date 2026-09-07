@@ -104,6 +104,14 @@ class TestRemoteOCRByDefault:
 
         assert cfg.remote_ocr_by_default is True
 
+    def test_auto_mode(self, make_remote_ocr_config, null_app_config) -> None:
+        cfg = make_remote_ocr_config(
+            null_app_config,
+            REMOTE_OCR_MODE=RemoteOCRMode.AUTO,
+        )
+
+        assert cfg.remote_ocr_by_default is True
+
     def test_workflow_only_mode(self, make_remote_ocr_config, null_app_config) -> None:
         cfg = make_remote_ocr_config(
             null_app_config,

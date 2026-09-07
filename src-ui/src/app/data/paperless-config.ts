@@ -75,6 +75,7 @@ export const RemoteOCREngineConfig = {
 
 export const RemoteOCRModeConfig = {
   ALWAYS: 'always',
+  AUTO: 'auto',
   WORKFLOW_ONLY: 'workflow_only',
 }
 
@@ -230,7 +231,7 @@ export const PaperlessConfigOptions: ConfigOption[] = [
     config_key: 'PAPERLESS_REMOTE_OCR_MODE',
     category: ConfigCategory.OCR,
     section: ConfigSection.RemoteOCR,
-    note: $localize`Which documents are sent to the remote engine. Use 'workflow_only' to keep remote OCR off unless a workflow enables it for a document.`,
+    note: $localize`Which documents are sent to the remote engine. Use 'auto' to send only documents with no embedded text and treat born-digital PDFs locally. Use 'workflow_only' to keep remote OCR off unless a workflow enables it for a document.`,
   },
   {
     key: 'app_logo',

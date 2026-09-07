@@ -228,10 +228,17 @@ export class DocumentService extends AbstractPaperlessService<Document> {
     return url.toString()
   }
 
-  getThumbUrl(id: number, versionID: number = null): string {
+  getThumbUrl(
+    id: number,
+    versionID: number = null,
+    thumbRev: string = null
+  ): string {
     let url = new URL(this.getResourceUrl(id, 'thumb'))
     if (versionID) {
       url.searchParams.append('version', versionID.toString())
+    }
+    if (thumbRev) {
+      url.searchParams.append('thumb-rev', thumbRev)
     }
     return url.toString()
   }
@@ -351,11 +358,11 @@ export class DocumentService extends AbstractPaperlessService<Document> {
 
   reprocessDocuments(
     selection: DocumentSelectionQuery,
-    remoteOcr: boolean = false
+    remoteOcrMode: 'local' | 'configured' | 'remote' = 'configured'
   ) {
     return this.http.post(this.getResourceUrl(null, 'reprocess'), {
       ...selection,
-      remote_ocr: remoteOcr,
+      remote_ocr_mode: remoteOcrMode,
     })
   }
 

@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from tempfile import mkstemp
+from typing import Literal
 
 from celery import Task
 from celery import shared_task
@@ -344,23 +345,32 @@ def update_document_content_maybe_archive_file(
     document_id,
     *,
     remote_ocr: bool = False,
+    remote_ocr_mode: Literal["local", "configured", "remote"] | None = None,
 ) -> None:
     """
     Re-creates OCR content and thumbnail for a document, and archive file if
     it exists.
 
-    Remote OCR is used only when the engine is configured to handle everything
-    or if explicitly asked for via ``remote_ocr``.
+    ``remote_ocr_mode`` can force local or remote processing, or follow the
+    configured remote OCR mode. ``remote_ocr`` is retained for API compatibility.
     """
     document = Document.objects.get(id=document_id)
 
     mime_type = document.mime_type
 
+    if remote_ocr_mode in {None, "configured"}:
+        allow_remote = remote_ocr or RemoteOCRConfig().remote_ocr_by_default
+        force_remote = remote_ocr
+    else:
+        allow_remote = remote_ocr_mode == "remote"
+        force_remote = remote_ocr_mode == "remote"
+
     parser_class = get_parser_registry().get_parser_for_file(
         mime_type,
         document.original_filename or "",
         document.source_path,
-        allow_remote=remote_ocr or RemoteOCRConfig().remote_ocr_by_default,
+        allow_remote=allow_remote,
+        force_remote=force_remote,
     )
 
     if not parser_class:

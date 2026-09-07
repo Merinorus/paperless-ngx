@@ -1835,3 +1835,16 @@ class TestBulkEditReprocess(DirectoriesMixin, TestCase):
         self.assertEqual(mock_task.apply_async.call_count, 2)
         for call in mock_task.apply_async.call_args_list:
             self.assertTrue(call.kwargs["kwargs"]["remote_ocr"])
+
+    @mock.patch("documents.bulk_edit.update_document_content_maybe_archive_file")
+    def test_reprocess_passes_remote_ocr_mode(self, mock_task: mock.Mock) -> None:
+        bulk_edit.reprocess([self.doc.id], remote_ocr_mode="local")
+
+        self.assertEqual(
+            mock_task.apply_async.call_args.kwargs["kwargs"],
+            {
+                "document_id": self.doc.id,
+                "remote_ocr": False,
+                "remote_ocr_mode": "local",
+            },
+        )

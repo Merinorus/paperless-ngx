@@ -17,6 +17,7 @@ class Migration(migrations.Migration):
                 blank=True,
                 choices=[
                     ("always", "All supported documents"),
+                    ("auto", "Only for documents with no embedded text"),
                     ("workflow_only", "Only when a workflow enables it"),
                 ],
                 max_length=32,
