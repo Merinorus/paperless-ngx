@@ -171,7 +171,6 @@ from documents.permissions import PaperlessAdminPermissions
 from documents.permissions import PaperlessNotePermissions
 from documents.permissions import PaperlessObjectPermissions
 from documents.permissions import ViewDocumentsPermissions
-from documents.permissions import annotate_document_count_by_ids
 from documents.permissions import annotate_document_count_for_related_queryset
 from documents.permissions import get_document_count_filter_for_user
 from documents.permissions import get_objects_for_user_owner_aware
@@ -1051,71 +1050,72 @@ class DocumentViewSet(
     )
 
     def _get_selection_data_for_queryset(self, queryset):
-        # Resolve once instead of once per model below. `queryset` can carry an
-        # arbitrarily expensive WHERE clause (user filters plus the permission
-        # filter); re-embedding it as a subquery inside 5 separate Count(...)
-        # calls forces the database to re-evaluate that whole thing 5 times, and
-        # -- for FK relations especially -- can defeat semi-join planning
-        # entirely at scale. A concrete id list is cheap to reuse.
-        # order_by() drops the default/user ordering -- irrelevant for a plain
-        # id list, but left in place it forces a sort over the full filtered
-        # set before the ids can even be collected.
-        document_ids = list(queryset.order_by().values_list("pk", flat=True))
+        # Keep filters and permissions in SQL instead of materializing every
+        # matching ID. This also keeps cachalot's query keys small and avoids
+        # rebuilding large parameter lists even when the counts are cached.
+        # Counts cover the entire selection, independently of page and order.
+        document_ids = queryset.order_by().values("pk")
+        documents = Document.objects.filter(pk__in=document_ids)
+        document_tags = Document.tags.through.objects.filter(
+            document_id__in=document_ids,
+        )
+        custom_field_instances = CustomFieldInstance.objects.filter(
+            document_id__in=document_ids,
+        )
 
-        correspondents = Correspondent.objects.annotate(
-            document_count=Count(
-                "documents",
-                filter=Q(documents__id__in=document_ids),
-                distinct=True,
+        result = {}
+        for key, objects, related_objects, group_field, document_field in (
+            (
+                "selected_correspondents",
+                Correspondent.objects.all(),
+                documents,
+                "correspondent_id",
+                "pk",
             ),
-        )
-        document_types = DocumentType.objects.annotate(
-            document_count=Count(
-                "documents",
-                filter=Q(documents__id__in=document_ids),
-                distinct=True,
+            (
+                "selected_tags",
+                Tag.objects.all(),
+                document_tags,
+                "tag_id",
+                "document_id",
             ),
-        )
-        storage_paths = StoragePath.objects.annotate(
-            document_count=Count(
-                "documents",
-                filter=Q(documents__id__in=document_ids),
-                distinct=True,
+            (
+                "selected_document_types",
+                DocumentType.objects.all(),
+                documents,
+                "document_type_id",
+                "pk",
             ),
-        )
-        # Tag and CustomField reach Document through an M2M/through-model table;
-        # a plain Count(filter=...) there is a much more expensive plan than the
-        # FK relations above once the bridge table is large -- see
-        # annotate_document_count_by_ids() for why.
-        tags = annotate_document_count_by_ids(
-            Tag.objects.all(),
-            through_model=Document.tags.through,
-            related_object_field="tag_id",
-            document_ids=document_ids,
-        )
-        custom_fields = annotate_document_count_by_ids(
-            CustomField.objects.all(),
-            through_model=CustomFieldInstance,
-            related_object_field="field_id",
-            document_ids=document_ids,
-        )
-        return {
-            "selected_correspondents": [
-                {"id": t.id, "document_count": t.document_count} for t in correspondents
-            ],
-            "selected_tags": [
-                {"id": t.id, "document_count": t.document_count} for t in tags
-            ],
-            "selected_document_types": [
-                {"id": t.id, "document_count": t.document_count} for t in document_types
-            ],
-            "selected_storage_paths": [
-                {"id": t.id, "document_count": t.document_count} for t in storage_paths
-            ],
-            "selected_custom_fields": [
-                {"id": t.id, "document_count": t.document_count} for t in custom_fields
-            ],
-        }
+            (
+                "selected_storage_paths",
+                StoragePath.objects.all(),
+                documents,
+                "storage_path_id",
+                "pk",
+            ),
+            (
+                "selected_custom_fields",
+                CustomField.objects.all(),
+                custom_field_instances,
+                "field_id",
+                "document_id",
+            ),
+        ):
+            # Aggregate the matching relations before assembling the response.
+            # A WHERE subquery avoids checking membership inside an aggregate
+            # FILTER for every row of a join against all metadata objects.
+            counts = dict(
+                related_objects.order_by()
+                .values(group_field)
+                .annotate(document_count=Count(document_field, distinct=True))
+                .values_list(group_field, "document_count"),
+            )
+            # Preserve metadata ordering and include objects with zero matches.
+            result[key] = [
+                {"id": pk, "document_count": counts.get(pk, 0)}
+                for pk in objects.values_list("pk", flat=True)
+            ]
+        return result
 
     def get_queryset(self):
         latest_version_content = Subquery(
