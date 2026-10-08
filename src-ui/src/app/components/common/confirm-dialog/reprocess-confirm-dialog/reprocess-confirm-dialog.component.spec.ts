@@ -34,10 +34,10 @@ describe('ReprocessConfirmDialogComponent', () => {
     settingsService = TestBed.inject(SettingsService)
   })
 
-  it('should not request remote OCR by default', () => {
+  it('should follow configured settings by default', () => {
     createComponent(true, RemoteOCRModeConfig.WORKFLOW_ONLY)
 
-    expect(component.remoteOcr).toBeFalsy()
+    expect(component.remoteOcrMode).toBe('configured')
   })
 
   it('should not offer remote OCR when no engine is configured', () => {
@@ -45,28 +45,36 @@ describe('ReprocessConfirmDialogComponent', () => {
 
     expect(component.showRemoteOcr).toBeFalsy()
     expect(
-      fixture.nativeElement.querySelector('#reprocessRemoteOcr')
+      fixture.nativeElement.querySelector('#reprocessRemoteOcrConfigured')
     ).toBeNull()
   })
 
-  it('should not offer remote OCR when it already handles every document', () => {
+  it('should offer overrides when remote OCR handles every document', () => {
     createComponent(true, RemoteOCRModeConfig.ALWAYS)
 
-    expect(component.showRemoteOcr).toBeFalsy()
+    expect(component.showRemoteOcr).toBeTruthy()
     expect(
-      fixture.nativeElement.querySelector('#reprocessRemoteOcr')
-    ).toBeNull()
+      fixture.nativeElement.querySelector('#reprocessRemoteOcrConfigured')
+    ).not.toBeNull()
   })
 
-  it('should offer remote OCR when configured and selective', () => {
+  it('should offer local, configured, and remote choices', () => {
     createComponent(true, RemoteOCRModeConfig.WORKFLOW_ONLY)
 
     expect(component.showRemoteOcr).toBeTruthy()
-    const checkbox = fixture.nativeElement.querySelector('#reprocessRemoteOcr')
-    expect(checkbox).not.toBeNull()
+    expect(
+      fixture.nativeElement.querySelector('#reprocessRemoteOcrLocal')
+    ).not.toBeNull()
+    expect(
+      fixture.nativeElement.querySelector('#reprocessRemoteOcrConfigured')
+    ).not.toBeNull()
+    const remote = fixture.nativeElement.querySelector(
+      '#reprocessRemoteOcrRemote'
+    )
+    expect(remote).not.toBeNull()
 
-    checkbox.click()
+    remote.click()
     fixture.detectChanges()
-    expect(component.remoteOcr).toBeTruthy()
+    expect(component.remoteOcrMode).toBe('remote')
   })
 })

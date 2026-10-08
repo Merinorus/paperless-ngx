@@ -88,6 +88,7 @@ class RemoteOCRMode(models.TextChoices):
     """
 
     ALWAYS = ("always", _("All supported documents"))
+    AUTO = ("auto", _("Only for documents with no embedded text"))
     WORKFLOW_ONLY = ("workflow_only", _("Only when a workflow enables it"))
 
 
@@ -303,6 +304,12 @@ class ApplicationConfiguration(AbstractSingletonModel):
         null=True,
     )
 
+    # PAPERLESS_CONSUMER_STORE_BARCODE_VALUES
+    barcode_store_values = models.BooleanField(
+        verbose_name=_("Stores the values of detected barcodes"),
+        null=True,
+    )
+
     """
     Settings for the remote OCR parser
     """
@@ -363,6 +370,13 @@ class ApplicationConfiguration(AbstractSingletonModel):
         blank=True,
         null=True,
         max_length=128,
+    )
+
+    llm_embedding_api_key = models.CharField(
+        verbose_name=_("Sets the LLM embedding API key"),
+        blank=True,
+        null=True,
+        max_length=1024,
     )
 
     llm_embedding_endpoint = models.CharField(

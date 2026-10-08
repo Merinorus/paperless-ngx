@@ -1,4 +1,3 @@
-import itertools
 import logging
 import os
 import platform
@@ -8,8 +7,10 @@ import zipfile
 from collections import defaultdict
 from collections import deque
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from datetime import timedelta
+from functools import wraps
 from http import HTTPStatus
 from pathlib import Path
 from time import mktime
@@ -49,7 +50,6 @@ from django.db.models import Sum
 from django.db.models import When
 from django.db.models.functions import Coalesce
 from django.db.models.functions import Lower
-from django.db.models.manager import Manager
 from django.http import FileResponse
 from django.http import Http404
 from django.http import HttpRequest
@@ -184,7 +184,7 @@ from documents.permissions import permitted_document_ids
 from documents.permissions import permitted_object_ids
 from documents.permissions import set_permissions_for_objects
 from documents.permissions import user_is_unrestricted
-from documents.plugins.date_parsing import get_date_parser
+from documents.plugins.date_parsing import get_date_parser, parse_date_set
 from documents.schema import generate_object_with_permissions_schema
 from documents.search import SearchHit
 from documents.serialisers import AcknowledgeTasksViewSerializer
@@ -194,6 +194,7 @@ from documents.serialisers import BulkEditSerializer
 from documents.serialisers import CorrespondentSerializer
 from documents.serialisers import CustomFieldSerializer
 from documents.serialisers import DeleteDocumentsSerializer
+from documents.serialisers import DocumentBarcodeSerializer
 from documents.serialisers import DocumentSelectionSerializer
 from documents.serialisers import DocumentSerializer
 from documents.serialisers import DocumentTypeSerializer
@@ -281,6 +282,40 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("paperless.api")
+
+
+def cache_if_given_query_parameter(
+    query_param: str,
+    *,
+    max_age=31536000,
+    private=False,
+):
+    """
+    Add a long cache control strategy only if a specified query parameter  is in the request.
+
+    E.g.: if query_param = "v", an URL containing the query parameter "?v=..." will be cached.
+    """
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(self, request, *args, **kwargs):
+            response = func(self, request, *args, **kwargs)
+            if response is not None:
+                parts = list()
+                if query_param in request.query_params:
+                    parts.append(f"max-age={max_age}")
+                    parts.append("immutable")
+                    if private:
+                        parts.append("private")
+                else:
+                    parts.append("no-cache")
+                response["Cache-Control"] = ", ".join(parts)
+            return response
+
+        return wrapper
+
+    return decorator
+
 
 # Crossover point for intersect_and_order: below this count use a targeted
 # IN-clause query; at or above this count fall back to a full-table scan +
@@ -846,6 +881,7 @@ class EmailDocumentDetailSchema(EmailSerializer):
                         required=False,
                     ),
                     "lang": serializers.CharField(),
+                    "barcodes": DocumentBarcodeSerializer(many=True),
                 },
             ),
             HTTPStatus.BAD_REQUEST: None,
@@ -1193,6 +1229,7 @@ class DocumentViewSet(
                     "version_label",
                     "root_document_id",
                     "version_index",
+                    "page_count",
                 ),
             ),
             "tags",
@@ -1272,13 +1309,16 @@ class DocumentViewSet(
         if (
             "version" not in request.query_params
             or not isinstance(response.data, dict)
-            or "content" not in response.data
+            or not ({"content", "page_count"} & response.data.keys())
         ):
             return response
 
         root_doc = self.get_object()
         content_doc = self._resolve_file_doc(root_doc, request)
-        response.data["content"] = content_doc.content or ""
+        if "content" in response.data:
+            response.data["content"] = content_doc.content or ""
+        if "page_count" in response.data:
+            response.data["page_count"] = content_doc.page_count
         return response
 
     def update(self, request, *args, **kwargs):
@@ -1474,7 +1514,7 @@ class DocumentViewSet(
         return None
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=5, max_stale=60))
     @method_decorator(
         condition(etag_func=metadata_etag, last_modified_func=metadata_last_modified),
     )
@@ -1523,6 +1563,7 @@ class DocumentViewSet(
             "original_filename": doc.original_filename,
             "archive_size": archive_filesize,
             "archive_metadata": archive_metadata,
+            "barcodes": DocumentBarcodeSerializer(doc.barcodes.all(), many=True).data,
         }
 
         lang = "en"
@@ -1535,7 +1576,7 @@ class DocumentViewSet(
         return Response(meta)
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=600, max_stale=3600 * 24))
     @method_decorator(
         condition(
             etag_func=suggestions_etag,
@@ -1564,18 +1605,13 @@ class DocumentViewSet(
 
         dates = []
         if settings.NUMBER_OF_SUGGESTED_DATES > 0:
-            with get_date_parser() as date_parser:
-                gen = date_parser.parse(doc.filename, doc.content)
-                dates = sorted(
-                    {
-                        i
-                        for i in itertools.islice(
-                            gen,
-                            settings.NUMBER_OF_SUGGESTED_DATES,
-                        )
-                    },
+            with ThreadPoolExecutor() as executor:
+                future_dates = executor.submit(
+                    parse_date_set,
+                    doc.filename,
+                    doc.content,
+                    settings.NUMBER_OF_SUGGESTED_DATES,
                 )
-
         resp_data = {
             "correspondents": [
                 c.id for c in match_correspondents(doc, classifier, request.user)
@@ -1587,8 +1623,14 @@ class DocumentViewSet(
             "storage_paths": [
                 dt.id for dt in match_storage_paths(doc, classifier, request.user)
             ],
-            "dates": [date.strftime("%Y-%m-%d") for date in dates if date is not None],
+            "dates": [],
         }
+        if settings.NUMBER_OF_SUGGESTED_DATES > 0:
+            dates = future_dates.result()
+            if dates:
+                resp_data["dates"] = [
+                    date.strftime("%Y-%m-%d") for date in dates if date is not None
+                ]
 
         # Cache the suggestions and the classifier hash for later
         set_suggestions_cache(doc.pk, resp_data, classifier)
@@ -1601,7 +1643,7 @@ class DocumentViewSet(
         filter_backends=[],
         url_path="ai_suggestions",
     )
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=10, max_stale=3600 * 24))
     def ai_suggestions(self, request, pk=None):
         doc = get_object_or_404(
             Document.objects.select_related("owner").prefetch_related("versions"),
@@ -1782,7 +1824,7 @@ class DocumentViewSet(
         return Response(resp_data)
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @method_decorator(cache_control(private=True, max_age=60, max_stale=3600 * 24 * 31))
     @method_decorator(
         condition(etag_func=preview_etag, last_modified_func=preview_last_modified),
     )
@@ -1808,7 +1850,7 @@ class DocumentViewSet(
             raise Http404
 
     @action(methods=["get"], detail=True, filter_backends=[])
-    @method_decorator(cache_control(no_cache=True))
+    @cache_if_given_query_parameter("thumb-rev", private=True)
     @method_decorator(
         condition(
             etag_func=thumbnail_etag,
@@ -2968,11 +3010,15 @@ class DocumentOperationPermissionMixin(PassUserMixin, DocumentSelectionMixin):
         if user.is_superuser:
             return True
 
-        document_objs = Document.objects.select_related("owner").filter(
-            pk__in=documents,
-        )
+        root_docs = {
+            get_root_document(doc)
+            for doc in Document.objects.select_related(
+                "owner",
+                "root_document__owner",
+            ).filter(pk__in=documents)
+        }
         user_is_owner_of_all_documents = all(
-            (doc.owner == user or doc.owner is None) for doc in document_objs
+            (doc.owner == user or doc.owner is None) for doc in root_docs
         )
 
         # check global and object permissions for all documents
@@ -2980,9 +3026,13 @@ class DocumentOperationPermissionMixin(PassUserMixin, DocumentSelectionMixin):
             user.has_perm(
                 "documents.change_document",
             )
-            and not document_objs.exclude(
+            and not Document.global_objects.filter(
+                pk__in=[doc.pk for doc in root_docs],
+            )
+            .exclude(
                 pk__in=permitted_document_ids(user, perm="change_document"),
-            ).exists()
+            )
+            .exists()
         )
 
         # check ownership for methods that change original document
@@ -3141,6 +3191,38 @@ class BulkEditView(DocumentOperationPermissionMixin):
 
     serializer_class = BulkEditSerializer
 
+    @staticmethod
+    def _snapshot_field(doc_ids: list[int], field: str) -> dict[int, Any]:
+        """
+        Returns each document's current value of field, for the audit log.
+
+        Tags and custom fields are one row per value, so they are gathered
+        into a sorted list of pks per document (empty when there are none).
+        Reading them through Document.values() instead would join those rows
+        and return one arbitrary value per document.
+        """
+        if field == "tags":
+            rows = (
+                Document.tags.through.objects.filter(document_id__in=doc_ids)
+                .order_by("tag_id")
+                .values_list("document_id", "tag_id")
+            )
+        elif field == "custom_fields":
+            rows = (
+                CustomFieldInstance.objects.filter(document_id__in=doc_ids)
+                .order_by("pk")
+                .values_list("document_id", "pk")
+            )
+        else:
+            return dict(
+                Document.objects.filter(pk__in=doc_ids).values_list("pk", field),
+            )
+
+        values: dict[int, list[int]] = {doc_id: [] for doc_id in doc_ids}
+        for doc_id, pk in rows:
+            values[doc_id].append(pk)
+        return values
+
     def post(self, request, *args, **kwargs):
         request_method = request.data.get("method")
         api_version = int(request.version or settings.REST_FRAMEWORK["DEFAULT_VERSION"])
@@ -3187,41 +3269,19 @@ class BulkEditView(DocumentOperationPermissionMixin):
         try:
             modified_field = self.MODIFIED_FIELD_BY_METHOD.get(method.__name__, None)
             if settings.AUDIT_LOG_ENABLED and modified_field:
-                old_documents = {
-                    obj["pk"]: obj
-                    for obj in Document.objects.filter(pk__in=documents).values(
-                        "pk",
-                        "correspondent",
-                        "document_type",
-                        "storage_path",
-                        "tags",
-                        "custom_fields",
-                        "deleted_at",
-                        "checksum",
-                    )
-                }
+                old_values = self._snapshot_field(documents, modified_field)
 
             result = method(documents, **parameters)
 
             if settings.AUDIT_LOG_ENABLED and modified_field:
-                new_documents = Document.objects.filter(pk__in=documents)
-                for doc in new_documents:
-                    old_value = old_documents[doc.pk][modified_field]
-                    new_value = getattr(doc, modified_field)
-
-                    if isinstance(new_value, Model):
-                        # correspondent, document type, etc.
-                        new_value = new_value.pk
-                    elif isinstance(new_value, Manager):
-                        # tags, custom fields
-                        new_value = list(new_value.values_list("pk", flat=True))
-
+                new_values = self._snapshot_field(documents, modified_field)
+                for doc in Document.objects.filter(pk__in=documents):
                     LogEntry.objects.log_create(
                         instance=doc,
                         changes={
                             modified_field: [
-                                old_value,
-                                new_value,
+                                old_values[doc.pk],
+                                new_values[doc.pk],
                             ],
                         },
                         action=LogEntry.Action.UPDATE,
@@ -3961,6 +4021,7 @@ class GlobalSearchView(PassUserMixin):
 class StatisticsView(GenericAPIView[Any]):
     permission_classes = (IsAuthenticated,)
 
+    @method_decorator(cache_control(max_age=60, max_stale=600))
     def get(self, request, format=None):
         user = request.user if request.user is not None else None
         can_view_global_stats = has_global_statistics_permission(user) or user is None

@@ -1,5 +1,6 @@
 import dataclasses
 import json
+from typing import Any
 
 from django.conf import settings
 
@@ -128,6 +129,7 @@ class BarcodeConfig(BaseConfig):
     barcode_enable_tag: bool = dataclasses.field(init=False)
     barcode_tag_mapping: dict[str, str] = dataclasses.field(init=False)
     barcode_tag_split: bool = dataclasses.field(init=False)
+    barcode_store_values: bool = dataclasses.field(init=False)
 
     def __post_init__(self) -> None:
         app_config = self._get_config_instance()
@@ -178,6 +180,11 @@ class BarcodeConfig(BaseConfig):
             if app_config.barcode_tag_split is not None
             else settings.CONSUMER_TAG_BARCODE_SPLIT
         )
+        self.barcode_store_values = (
+            app_config.barcode_store_values
+            if app_config.barcode_store_values is not None
+            else settings.CONSUMER_STORE_BARCODE_VALUES
+        )
 
 
 @dataclasses.dataclass
@@ -226,13 +233,14 @@ class RemoteOCRConfig(BaseConfig):
     @property
     def remote_ocr_by_default(self) -> bool:
         """
-        Whether every supported document goes to the remote engine.
+        Whether documents are eligible for the remote engine by default.
 
-        When False the remote engine is used only for documents that
+        In auto mode the remote parser makes the final decision based on whether
+        a PDF already has embedded text. When False the remote engine is used only for documents that
         explicitly asked for it, i.e. a workflow matched during consumption or
         the user ticked the box when reprocessing.
         """
-        return self.remote_ocr_mode == RemoteOCRMode.ALWAYS
+        return self.remote_ocr_mode in {RemoteOCRMode.ALWAYS, RemoteOCRMode.AUTO}
 
 
 @dataclasses.dataclass
@@ -244,6 +252,7 @@ class AIConfig(BaseConfig):
     ai_enabled: bool = dataclasses.field(init=False)
     llm_embedding_backend: str = dataclasses.field(init=False)
     llm_embedding_model: str = dataclasses.field(init=False)
+    llm_embedding_api_key: str = dataclasses.field(init=False)
     llm_embedding_endpoint: str = dataclasses.field(init=False)
     llm_embedding_chunk_size: int = dataclasses.field(init=False)
     llm_context_size: int = dataclasses.field(init=False)
@@ -254,6 +263,7 @@ class AIConfig(BaseConfig):
     llm_endpoint: str = dataclasses.field(init=False)
     llm_output_language: str = dataclasses.field(init=False)
     llm_allow_internal_endpoints: bool = dataclasses.field(init=False)
+    llm_extra_params: dict[str, Any] = dataclasses.field(init=False)
 
     def __post_init__(self) -> None:
         app_config = self._get_config_instance()
@@ -268,6 +278,9 @@ class AIConfig(BaseConfig):
         )
         self.llm_embedding_model = (
             app_config.llm_embedding_model or settings.LLM_EMBEDDING_MODEL
+        )
+        self.llm_embedding_api_key = (
+            app_config.llm_embedding_api_key or settings.LLM_EMBEDDING_API_KEY
         )
         self.llm_embedding_endpoint = (
             app_config.llm_embedding_endpoint or settings.LLM_EMBEDDING_ENDPOINT
@@ -287,6 +300,7 @@ class AIConfig(BaseConfig):
             app_config.llm_output_language or settings.LLM_OUTPUT_LANGUAGE
         )
         self.llm_allow_internal_endpoints = settings.LLM_ALLOW_INTERNAL_ENDPOINTS
+        self.llm_extra_params = settings.LLM_EXTRA_PARAMS
 
     @property
     def llm_index_enabled(self) -> bool:

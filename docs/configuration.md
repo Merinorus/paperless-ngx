@@ -1796,6 +1796,13 @@ assigns or creates tags if a properly formatted barcode is detected.
 
     Defaults to false.
 
+#### [`PAPERLESS_CONSUMER_STORE_BARCODE_VALUES=<bool>`](#PAPERLESS_CONSUMER_STORE_BARCODE_VALUES) {#PAPERLESS_CONSUMER_STORE_BARCODE_VALUES}
+
+: Stores the content of every barcode found during consumption, see
+[Barcode Contents](advanced_usage.md#barcode-contents).
+
+    Defaults to false.
+
 ## Audit Trail
 
 #### [`PAPERLESS_AUDIT_LOG_ENABLED=<bool>`](#PAPERLESS_AUDIT_LOG_ENABLED) {#PAPERLESS_AUDIT_LOG_ENABLED}
@@ -2094,6 +2101,12 @@ password. All of these options come from their similarly-named [Django settings]
 
     - `always`: every document of a supported file type is sent to the remote
       engine, bypassing the local OCR engine.
+    - `auto`: every document of a supported file type is sent to the remote
+      engine, except if they are born-digital. PDFs that already contain text are processed
+      by the local OCR engine. This selection is independent of
+      `PAPERLESS_ARCHIVE_FILE_GENERATION`: with `PAPERLESS_ARCHIVE_FILE_GENERATION=always`
+      and `PAPERLESS_REMOTE_OCR_MODE=auto`, a born-digital PDF's archive will be generated
+      with the local OCR engine.
     - `workflow_only`: documents are processed locally unless a workflow
       explicitly enables remote OCR for them, letting you use the remote engine
       selectively.
@@ -2130,6 +2143,13 @@ models supported by the current embedding backend. If not supplied, defaults to
 "sentence-transformers/all-MiniLM-L6-v2" for Huggingface, and "embeddinggemma" for Ollama.
 See [choosing AI models](https://github.com/paperless-ngx/paperless-ngx/wiki/AI-Model-Recommendations)
 for language and resource considerations.
+
+    Defaults to None.
+
+#### [`PAPERLESS_AI_LLM_EMBEDDING_API_KEY=<str>`](#PAPERLESS_AI_LLM_EMBEDDING_API_KEY) {#PAPERLESS_AI_LLM_EMBEDDING_API_KEY}
+
+: The API key to use for the embedding backend. If not supplied, embeddings use
+`PAPERLESS_AI_LLM_API_KEY`.
 
     Defaults to None.
 
@@ -2216,6 +2236,19 @@ used with the OpenAI-compatible backend to target a custom provider or local gat
 : If set to false, Paperless blocks AI endpoint URLs that resolve to non-public addresses (e.g., localhost, etc).
 
     Defaults to true, which allows internal endpoints.
+
+#### [`PAPERLESS_AI_LLM_EXTRA_PARAMS=<json>`](#PAPERLESS_AI_LLM_EXTRA_PARAMS) {#PAPERLESS_AI_LLM_EXTRA_PARAMS}
+
+: A JSON object of extra parameters sent with every LLM request, for providers that require a parameter Paperless does not
+set itself. Values here override Paperless' own, and no validation is performed. Whatever you put here is passed to the
+backend as-is, so an invalid parameter will simply be rejected by your provider. For example, current OpenAI reasoning
+models refuse tool calls on the chat completions API unless reasoning is off:
+
+    ```
+    PAPERLESS_AI_LLM_EXTRA_PARAMS={"reasoning_effort": "none"}
+    ```
+
+    Defaults to empty, which adds nothing to requests.
 
 #### [`PAPERLESS_LLM_INDEX_TASK_CRON=<cron expression>`](#PAPERLESS_LLM_INDEX_TASK_CRON) {#PAPERLESS_LLM_INDEX_TASK_CRON}
 

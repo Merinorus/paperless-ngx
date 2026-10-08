@@ -17,9 +17,9 @@ from documents.models import Tag
 from documents.models import WorkflowAction
 from documents.sanity_checker import SanityCheckFailedException
 from documents.sanity_checker import SanityCheckMessages
-from documents.tests.test_classifier import dummy_preprocess
-from documents.tests.utils import DirectoriesMixin
-from documents.tests.utils import FileSystemAssertsMixin
+from documents.tests.helpers import dummy_preprocess
+from paperless_testing.assertions import FileSystemAssertsMixin
+from paperless_testing.dirs import DirectoriesMixin
 
 
 @pytest.mark.django_db
@@ -325,6 +325,22 @@ class TestUpdateContentRemoteOCR(DirectoriesMixin, TestCase):
     @override_settings(REMOTE_OCR_MODE="workflow_only")
     def test_workflow_only_mode_allows_remote_when_requested(self) -> None:
         self.assertTrue(self._allow_remote(remote_ocr=True))
+        _, call_kwargs = self.mock_registry.return_value.get_parser_for_file.call_args
+        self.assertTrue(call_kwargs["force_remote"])
+
+    @override_settings(REMOTE_OCR_MODE="always")
+    def test_local_override_disables_remote(self) -> None:
+        self.assertFalse(self._allow_remote(remote_ocr_mode="local"))
+
+    @override_settings(REMOTE_OCR_MODE="workflow_only")
+    def test_configured_uses_global_mode(self) -> None:
+        self.assertFalse(self._allow_remote(remote_ocr_mode="configured"))
+
+    @override_settings(REMOTE_OCR_MODE="workflow_only")
+    def test_remote_override_forces_remote(self) -> None:
+        self.assertTrue(self._allow_remote(remote_ocr_mode="remote"))
+        _, call_kwargs = self.mock_registry.return_value.get_parser_for_file.call_args
+        self.assertTrue(call_kwargs["force_remote"])
 
 
 class TestAIIndex(DirectoriesMixin, TestCase):

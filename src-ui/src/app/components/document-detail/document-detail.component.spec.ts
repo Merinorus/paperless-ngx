@@ -43,7 +43,7 @@ import {
 } from 'src/app/data/filter-rule-type'
 import { StoragePath } from 'src/app/data/storage-path'
 import { Tag } from 'src/app/data/tag'
-import { SETTINGS_KEYS } from 'src/app/data/ui-settings'
+import { SETTINGS_KEYS, SuggestionSource } from 'src/app/data/ui-settings'
 import { PermissionsGuard } from 'src/app/guards/permissions.guard'
 import { CustomDatePipe } from 'src/app/pipes/custom-date.pipe'
 import { DocumentTitlePipe } from 'src/app/pipes/document-title.pipe'
@@ -662,6 +662,45 @@ describe('DocumentDetailComponent', () => {
     )
   })
 
+  it.each([
+    ['tag', 'createTag', 'tags', 'suggested_tags'],
+    [
+      'document type',
+      'createDocumentType',
+      'document_type',
+      'suggested_document_types',
+    ],
+    [
+      'correspondent',
+      'createCorrespondent',
+      'correspondent',
+      'suggested_correspondents',
+    ],
+  ])(
+    'should create a %s after ML-only suggestions',
+    (_, method, field, suggestedField) => {
+      initNormally()
+      component.suggestions.set({ tags: [1] })
+      let openModal: NgbModalRef
+      modalService.activeInstances.subscribe((modal) => (openModal = modal[0]))
+      component[method]('New value')
+      openModal.componentInstance.succeeded.next({
+        id: 12,
+        name: 'New value',
+        is_inbox_tag: false,
+        color: '#ff0000',
+        text_color: '#000000',
+      })
+
+      if (field === 'tags') {
+        expect(component.tagsInput.value).toContain(12)
+      } else {
+        expect(component.documentForm.get(field).value).toBe(12)
+      }
+      expect(component.suggestions()[suggestedField]).toEqual([])
+    }
+  )
+
   it('should support creating storage path', () => {
     initNormally()
     let openModal: NgbModalRef
@@ -969,7 +1008,10 @@ describe('DocumentDetailComponent', () => {
     component.reprocess()
     const modalCloseSpy = jest.spyOn(openModal, 'close')
     openModal.componentInstance.confirmClicked.next()
-    expect(reprocessSpy).toHaveBeenCalledWith({ documents: [doc.id] }, false)
+    expect(reprocessSpy).toHaveBeenCalledWith(
+      { documents: [doc.id] },
+      'configured'
+    )
     expect(modalSpy).toHaveBeenCalled()
     expect(toastSpy).toHaveBeenCalled()
     expect(modalCloseSpy).toHaveBeenCalled()
@@ -982,9 +1024,9 @@ describe('DocumentDetailComponent', () => {
     let openModal: NgbModalRef
     modalService.activeInstances.subscribe((modal) => (openModal = modal[0]))
     component.reprocess()
-    openModal.componentInstance.remoteOcr = true
+    openModal.componentInstance.remoteOcrMode = 'remote'
     openModal.componentInstance.confirmClicked.next()
-    expect(reprocessSpy).toHaveBeenCalledWith({ documents: [doc.id] }, true)
+    expect(reprocessSpy).toHaveBeenCalledWith({ documents: [doc.id] }, 'remote')
   })
 
   it('should show error if redo ocr call fails', () => {
@@ -1528,6 +1570,113 @@ describe('DocumentDetailComponent', () => {
     expect(component.suggestionsLoading()).toBeFalsy()
   })
 
+  it('should get and merge ML and AI suggestions when source is both', () => {
+    settingsService.set(
+      SETTINGS_KEYS.DOCUMENT_EDITING_SUGGESTION_SOURCE,
+      SuggestionSource.Both
+    )
+    const getSetting = settingsService.get.bind(settingsService)
+    jest
+      .spyOn(settingsService, 'get')
+      .mockImplementation((key) =>
+        key === SETTINGS_KEYS.AI_ENABLED ? true : getSetting(key)
+      )
+    const suggestionsSpy = jest
+      .spyOn(documentService, 'getSuggestions')
+      .mockReturnValue(of({ tags: [42], dates: ['2024-01-01'] }))
+    const aiSuggestionsSpy = jest
+      .spyOn(documentService, 'getAiSuggestions')
+      .mockReturnValue(
+        of({ title: 'AI title', tags: [42, 43], suggested_tags: ['New'] })
+      )
+    initNormally()
+    expect(suggestionsSpy).toHaveBeenCalled()
+    expect(aiSuggestionsSpy).toHaveBeenCalled()
+    expect(component.suggestions().title).toEqual('AI title')
+    expect(component.suggestions().tags).toEqual([42, 43])
+    expect(component.suggestions().suggested_tags).toEqual(['New'])
+    expect(component.suggestions().dates).toEqual(['2024-01-01'])
+  })
+
+  it('should only fetch sources not yet fetched for the document', () => {
+    settingsService.set(SETTINGS_KEYS.DOCUMENT_EDITING_AUTO_SUGGEST, false)
+    settingsService.set(
+      SETTINGS_KEYS.DOCUMENT_EDITING_SUGGESTION_SOURCE,
+      SuggestionSource.ML
+    )
+    const getSetting = settingsService.get.bind(settingsService)
+    jest
+      .spyOn(settingsService, 'get')
+      .mockImplementation((key) =>
+        key === SETTINGS_KEYS.AI_ENABLED ? true : getSetting(key)
+      )
+    const suggestionsSpy = jest
+      .spyOn(documentService, 'getSuggestions')
+      .mockReturnValue(of({ tags: [42] }))
+    const aiSuggestionsSpy = jest
+      .spyOn(documentService, 'getAiSuggestions')
+      .mockReturnValue(of({ tags: [43] }))
+    initNormally()
+
+    component.getSuggestions()
+    expect(suggestionsSpy).toHaveBeenCalledTimes(1)
+    expect(aiSuggestionsSpy).not.toHaveBeenCalled()
+
+    component.getSuggestions(SuggestionSource.Both)
+    expect(suggestionsSpy).toHaveBeenCalledTimes(1)
+    expect(aiSuggestionsSpy).toHaveBeenCalledTimes(1)
+    expect(component.suggestions().tags).toEqual([42, 43])
+
+    component.getSuggestions(SuggestionSource.Both)
+    expect(suggestionsSpy).toHaveBeenCalledTimes(1)
+    expect(aiSuggestionsSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('should use the per-document source override and reset it on document change', () => {
+    settingsService.set(SETTINGS_KEYS.DOCUMENT_EDITING_AUTO_SUGGEST, false)
+    const getSetting = settingsService.get.bind(settingsService)
+    jest
+      .spyOn(settingsService, 'get')
+      .mockImplementation((key) =>
+        key === SETTINGS_KEYS.AI_ENABLED ? true : getSetting(key)
+      )
+    initNormally()
+    expect(component.suggestionSource).toEqual(SuggestionSource.AI)
+    component.suggestionSourceOverride.set(SuggestionSource.ML)
+    expect(component.suggestionSource).toEqual(SuggestionSource.ML)
+
+    jest
+      .spyOn(documentService, 'get')
+      .mockReturnValueOnce(of(Object.assign({}, doc)))
+    ;(component as any).loadDocument(doc.id, true)
+    expect(component.suggestionSourceOverride()).toBeNull()
+    expect(component.fetchedSuggestionSources()).toEqual([])
+  })
+
+  it('should keep suggestions from one source if the other fails', () => {
+    settingsService.set(
+      SETTINGS_KEYS.DOCUMENT_EDITING_SUGGESTION_SOURCE,
+      SuggestionSource.Both
+    )
+    const getSetting = settingsService.get.bind(settingsService)
+    jest
+      .spyOn(settingsService, 'get')
+      .mockImplementation((key) =>
+        key === SETTINGS_KEYS.AI_ENABLED ? true : getSetting(key)
+      )
+    const errorSpy = jest.spyOn(toastService, 'showError')
+    jest
+      .spyOn(documentService, 'getSuggestions')
+      .mockReturnValue(of({ tags: [42] }))
+    jest
+      .spyOn(documentService, 'getAiSuggestions')
+      .mockReturnValue(throwError(() => new Error('failed')))
+    initNormally()
+    expect(errorSpy).toHaveBeenCalled()
+    expect(component.suggestions().tags).toEqual([42])
+    expect(component.fetchedSuggestionSources()).toEqual([SuggestionSource.ML])
+  })
+
   it('should show error if needed for get suggestions', () => {
     const suggestionsSpy = jest.spyOn(documentService, 'getSuggestions')
     const errorSpy = jest.spyOn(toastService, 'showError')
@@ -1973,7 +2122,7 @@ describe('DocumentDetailComponent', () => {
     httpTestingController.expectOne(component.previewUrl()).flush('preview')
 
     previewSpy.mockReturnValueOnce('preview-version')
-    jest.spyOn(documentService, 'getThumbUrl').mockReturnValue('thumb-version')
+    jest.spyOn(documentService, 'getThumbUrl').mockReturnValue('thumb-rev')
     jest
       .spyOn(documentService, 'get')
       .mockReturnValue(of({ content: 'version-content' } as Document))
@@ -1982,7 +2131,7 @@ describe('DocumentDetailComponent', () => {
     httpTestingController.expectOne('preview-version').flush('version text')
 
     expect(component.previewUrl()).toBe('preview-version')
-    expect(component.thumbUrl()).toBe('thumb-version')
+    expect(component.thumbUrl()).toBe('thumb-rev')
     expect(component.previewText()).toBe('version text')
     expect(component.documentForm.get('content').value).toBe('version-content')
     expect(component.pdfSource()).toBe('preview-version')
