@@ -370,6 +370,15 @@ instead of being removed from the filesystem. Only the original version is kept.
 
     This setting was previously named PAPERLESS_TRASH_DIR.
 
+#### [`PAPERLESS_SCRATCH_DIR=<path>`](#PAPERLESS_SCRATCH_DIR) {#PAPERLESS_SCRATCH_DIR}
+
+: This folder is used as a temporary workspace for multiple paperless operations, including
+consuming documents, editing, and the document exporter.
+
+    This must be writeable by the user running paperless.
+
+    Defaults to "/tmp/paperless".
+
 #### [`PAPERLESS_MEDIA_ROOT=<path>`](#PAPERLESS_MEDIA_ROOT) {#PAPERLESS_MEDIA_ROOT}
 
 : This is where your documents and thumbnails are stored.
@@ -2101,6 +2110,12 @@ password. All of these options come from their similarly-named [Django settings]
 
     - `always`: every document of a supported file type is sent to the remote
       engine, bypassing the local OCR engine.
+    - `auto`: every document of a supported file type is sent to the remote
+      engine, except if they are born-digital. PDFs that already contain text are processed
+      by the local OCR engine. This selection is independent of
+      `PAPERLESS_ARCHIVE_FILE_GENERATION`: with `PAPERLESS_ARCHIVE_FILE_GENERATION=always`
+      and `PAPERLESS_REMOTE_OCR_MODE=auto`, a born-digital PDF's archive will be generated
+      with the local OCR engine.
     - `workflow_only`: documents are processed locally unless a workflow
       explicitly enables remote OCR for them, letting you use the remote engine
       selectively.

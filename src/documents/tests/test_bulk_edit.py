@@ -2085,3 +2085,21 @@ class TestBulkEditReprocess:
         bulk_edit.reprocess([root.id, latest.id])
 
         assert self._queued_ids(mock_task) == [latest.id]
+
+    @pytest.mark.parametrize("remote_ocr_mode", ["local", "configured", "remote"])
+    def test_reprocess_passes_remote_ocr_mode(
+        self,
+        mock_task: mock.MagicMock,
+        remote_ocr_mode: str,
+    ) -> None:
+        root = DocumentFactory()
+        latest = DocumentFactory(root_document=root, version_index=1)
+
+        bulk_edit.reprocess([root.id, latest.id], remote_ocr_mode=remote_ocr_mode)
+
+        mock_task.apply_async.assert_called_once()
+        assert mock_task.apply_async.call_args.kwargs["kwargs"] == {
+            "document_id": latest.id,
+            "remote_ocr": False,
+            "remote_ocr_mode": remote_ocr_mode,
+        }

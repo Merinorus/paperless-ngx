@@ -302,8 +302,9 @@ The following methods are supported:
 - `delete`
   - No `parameters` required
 - `reprocess`
-  - Optional `parameters`: `{ "remote_ocr": true }` to send the documents to the
-    remote OCR engine, see [Remote OCR](usage.md#remote-ocr). Defaults to false.
+  - Optional `parameters`: `remote_ocr_mode` may be `local`, `configured`, or
+    `remote`. The legacy `{ "remote_ocr": true }` form continues to force the
+    remote OCR engine. See [Remote OCR](usage.md#remote-ocr).
 - `set_permissions`
   - Requires `parameters`:
     - `"set_permissions": PERMISSIONS_OBJ` (see format [above](#permissions)) and / or

@@ -409,12 +409,17 @@ def delete(doc_ids: list[int]) -> Literal["OK"]:
     return "OK"
 
 
-def reprocess(doc_ids: list[int], *, remote_ocr: bool = False) -> Literal["OK"]:
+def reprocess(
+    doc_ids: list[int],
+    *,
+    remote_ocr: bool = False,
+    remote_ocr_mode: Literal["local", "configured", "remote"] | None = None,
+) -> Literal["OK"]:
     """
     Re-run parsing for the given documents.
 
-    Consumption workflows do not run here, so ``remote_ocr`` is how the user
-    asks for the remote engine when it is not configured to handle everything.
+    ``remote_ocr_mode`` can force local or remote processing, or follow the
+    configured remote OCR mode. ``remote_ocr`` is retained for API compatibility.
 
     A root document with versions reprocesses its latest version, which is the
     file whose content, archive and thumbnail are shown for it.
@@ -435,8 +440,14 @@ def reprocess(doc_ids: list[int], *, remote_ocr: bool = False) -> Literal["OK"]:
         .distinct()
     )
     for source_id in source_ids:
+        task_kwargs: dict[str, int | bool | str] = {
+            "document_id": source_id,
+            "remote_ocr": remote_ocr,
+        }
+        if remote_ocr_mode is not None:
+            task_kwargs["remote_ocr_mode"] = remote_ocr_mode
         update_document_content_maybe_archive_file.apply_async(
-            kwargs={"document_id": source_id, "remote_ocr": remote_ocr},
+            kwargs=task_kwargs,
             headers={"trigger_source": PaperlessTask.TriggerSource.MANUAL},
         )
 
